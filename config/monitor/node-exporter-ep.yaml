@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Endpoints
+metadata:
+  labels:
+    app.kubernetes.io/name: kube-state-metrics
+    instance: test-master
+    service.kubernetes.io/headless: ""
+  name: kube-state-metrics
+  namespace: monitoring
+subsets:
+- addresses:
+  - ip: 10.244.123.130
+    nodeName: cxl1-super-server
+  ports:
+  - name: http-metrics
+    port: 8080
+    protocol: TCP

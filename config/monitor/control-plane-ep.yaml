@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: Endpoints
+metadata:
+  labels:
+    k8s-app: master
+  name: master
+  namespace: monitoring
+subsets:
+- addresses:
+  - ip: <MASTER-NODE-0-IP>
+  - ip: <MASTER-NODE-1-IP>
+  - ip: <MASTER-NODE-2-IP>
+  ports:
+  - name: apiserver
+    port: 6443
+    protocol: TCP
+  - name: kube-scheduler
+    port: 10259
+    protocol: TCP
+  - name: kube-controller-manager
+    port: 10257
+    protocol: TCP
+

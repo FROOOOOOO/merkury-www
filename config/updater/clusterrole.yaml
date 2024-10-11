@@ -1,0 +1,9 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: updater-role
+rules:
+- apiGroups: ['flowcontrol.apiserver.k8s.io', '']
+  resources: ['prioritylevelconfigurations', 'flowschemas', 'pods']
+  verbs: ['*']
+

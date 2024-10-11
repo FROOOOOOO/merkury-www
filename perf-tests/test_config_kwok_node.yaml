@@ -1,0 +1,147 @@
+  {{$ENABLE_CHAOSMONKEY := DefaultParam .ENABLE_CHAOSMONKEY false}}
+    {{$NODES_PER_KWOK := DivideInt .Nodes 10}}
+
+  name: kwok-node
+    # namespace:
+    #   number: 1
+    #   deleteAutomanagedNamespaces: true
+
+  tuningSets:
+    - name: Uniformtinyqps
+      qpsLoad:
+        qps: 0.1
+    - name: Uniform1qps
+      qpsLoad:
+        qps: 1
+    - name: Uniform100qps
+      qpsLoad:
+        qps: 100
+    {{if $ENABLE_CHAOSMONKEY}}
+  chaosMonkey:
+    nodeFailure:
+      failureRate: 0.01
+      interval: 1m
+      jitterFactor: 10.0
+      simulatedDowntime: 10m
+    {{end}}
+  steps:
+    - name: Create kwok nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake
+    - name: Create kwok1 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok1-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake1
+    - name: Create kwok2 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok2-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake2
+    - name: Create kwok3 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok3-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake3
+    - name: Create kwok4 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok4-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake4
+    - name: Create kwok5 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok5-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake5
+    - name: Create kwok6 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok6-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake6
+    - name: Create kwok7 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok7-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake7
+    - name: Create kwok8 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok8-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake8
+    - name: Create kwok9 nodes
+      phases:
+        - namespaceRange:
+            min: 1
+            max: 1
+          replicasPerNamespace: {{$NODES_PER_KWOK}}
+          tuningSet: Uniform100qps
+          objectBundle:
+            - basename: kwok9-node
+              objectTemplatePath: "kwok-node.yaml"
+              templateFillMap:
+                Annotation: fake9

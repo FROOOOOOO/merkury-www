@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: Endpoints
+metadata:
+  labels:
+    app.kubernetes.io/name: test-master
+    k8s-app: test-master
+  name: test-master
+  namespace: monitoring
+subsets:
+- addresses:
+  - ip: <MASTER-NODE-0-IP>
+  - ip: <MASTER-NODE-1-IP>
+  - ip: <MASTER-NODE-2-IP>
+  - ip: <ETCD-NODE-IP>
+  ports:
+  - name: https-metrics
+    port: 10250
+    protocol: TCP
+  - name: http-metrics
+    port: 10255
+    protocol: TCP
+  - name: cadvisor
+    port: 4194
+    protocol: TCP
+

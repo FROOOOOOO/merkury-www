@@ -1,0 +1,38 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: external-node
+  namespace: monitoring
+spec:
+  endpoints:
+  - bearerTokenSecret:
+      key: token
+      name: test-master
+    honorLabels: true
+    port: https-metrics
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __metrics_path__
+      targetLabel: metrics_path
+    scheme: https
+    tlsConfig:
+      insecureSkipVerify: true
+  - port: https-metrics
+    interval: 15s
+    path: /metrics/cadvisor
+    relabelings:
+    - action: replace
+      sourceLabels:
+      - __metrics_path__
+      targetLabel: metrics_path
+    scheme: https
+    tlsConfig:
+      insecureSkipVerify: true
+  namespaceSelector:
+    matchNames:
+    - monitoring
+  selector:
+    matchLabels:
+      k8s-app: test-master
+

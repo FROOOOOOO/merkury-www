@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Endpoints
+metadata:
+  annotations:
+  labels:
+    k8s-app: master
+  name: test-master-etcd
+  namespace: monitoring
+subsets:
+- addresses:
+  - ip: <ETCD-NODE-IP>
+  ports:
+  - name: etcd-2381
+    port: 2381
+    protocol: TCP

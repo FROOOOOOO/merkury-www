@@ -1,0 +1,13 @@
+apiVersion: flowcontrol.apiserver.k8s.io/v1beta3
+kind: PriorityLevelConfiguration
+metadata:
+  name: empty
+spec:
+  limited:
+    borrowingLimitPercent: 0
+    lendablePercent: 0
+    limitResponse:
+      type: Reject
+    nominalConcurrencyShares: 980  # 245 * (max-requests-inflight(2000) + max-mutating-requests-inflight(1000) - 600) / 600
+  type: Limited
+

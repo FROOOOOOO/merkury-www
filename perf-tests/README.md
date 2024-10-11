@@ -1,0 +1,1 @@
+Please clone https://github.com/kubernetes/perf-tests here and move all yamls to `clusterloader2/testing/density/` directory.

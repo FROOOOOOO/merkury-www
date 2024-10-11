@@ -1,0 +1,116 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: test-master-etcd
+  namespace: kube-system
+spec:
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  podManagementPolicy: Parallel
+  replicas: 1
+  revisionHistoryLimit: 100
+  selector:
+    matchLabels:
+      component: etcd
+      node: ssd
+      tier: control-plane
+  serviceName: etcd-0
+  template:
+    metadata:
+      annotations:
+        kubeadm.kubernetes.io/etcd.advertise-client-urls: https://<ETCD-NODE-IP>:2379
+      creationTimestamp: null
+      labels:
+        component: etcd
+        control: test-master
+        node: ssd
+        tier: control-plane
+      name: etcd
+      namespace: kube-system
+    spec:
+      containers:
+      - command:
+        - etcd
+        - --advertise-client-urls=https://<ETCD-NODE-IP>:2379
+        - --cert-file=/etc/kubernetes/pki/etcd/server.crt
+        - --client-cert-auth=true
+        - --data-dir=/var/lib/etcd
+        - --experimental-initial-corrupt-check=true
+        - --experimental-watch-progress-notify-interval=5s
+        - --initial-advertise-peer-urls=https://<ETCD-NODE-IP>:2380
+        - --initial-cluster=test-master-0=https://<ETCD-NODE-IP>:2380
+        - --key-file=/etc/kubernetes/pki/etcd/server.key
+        - --listen-client-urls=https://127.0.0.1:2379,https://<ETCD-NODE-IP>:2379
+        - --listen-metrics-urls=http://127.0.0.1:2381,http://<ETCD-NODE-IP>:2381
+        - --listen-peer-urls=https://<ETCD-NODE-IP>:2380
+        - --name=test-master-0
+        - --peer-cert-file=/etc/kubernetes/pki/etcd/peer.crt
+        - --peer-client-cert-auth=true
+        - --peer-key-file=/etc/kubernetes/pki/etcd/peer.key
+        - --peer-trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt
+        - --trusted-ca-file=/etc/kubernetes/pki/etcd/ca.crt
+        image: registry.cn-hangzhou.aliyuncs.com/google_containers/etcd:3.5.7-0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          failureThreshold: 8
+          httpGet:
+            host: 127.0.0.1
+            path: /health?exclude=NOSPACE&serializable=true
+            port: 2381
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 15
+        name: etcd
+        resources:
+          requests:
+            cpu: 200m
+            memory: 1040M
+        startupProbe:
+          failureThreshold: 24
+          httpGet:
+            host: 127.0.0.1
+            path: /health?serializable=false
+            port: 2381
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          successThreshold: 1
+          timeoutSeconds: 15
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/lib/etcd
+          name: etcd-data
+        - mountPath: /etc/kubernetes/pki/etcd
+          name: etcd-certs
+      dnsPolicy: ClusterFirstWithHostNet
+      hostNetwork: true
+      nodeName: cxl1-super-server
+      priority: 2000001000
+      priorityClassName: system-node-critical
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      volumes:
+      - hostPath:
+          path: /etc/kubernetes/pki/etcd
+          type: DirectoryOrCreate
+        name: etcd-certs
+      - hostPath:
+          path: /var/lib/etcd
+          type: DirectoryOrCreate
+        name: etcd-data
+  updateStrategy:
+    rollingUpdate:
+      partition: 0
+    type: RollingUpdate
+
