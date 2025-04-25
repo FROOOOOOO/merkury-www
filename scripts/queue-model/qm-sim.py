@@ -14,7 +14,7 @@ if __name__ == '__main__':
     cpu = np.array([0 for _ in range(len(con))])
     parser = argparse.ArgumentParser(description='Simulate metrics for self-designed queue models.')
     parser.add_argument('--mapping', '-m', type=int, default=0,
-                        help='choose mapping: 0-increase-no-change, 1-increasing, 2-varying')
+                        help='choose mapping: -1-M/M/c/K, 0-increasing-stable, 1-increasing, 2-varying')
     parser.add_argument('--dry_run', '-d', action='store_true',
                         help='if set, simulation will only list (c*, f*) points to calculate instead of '
                              'really calculating them')
@@ -34,19 +34,27 @@ if __name__ == '__main__':
     decimal.getcontext().prec = args.precision
     total_load = decimal.Decimal(args.total_load)
     file_path = f'{python_path}/output/queue-model-truncation/'
-    assert args.mapping in [0, 1, 2], 'invalid mapping'
-    if args.mapping == 0:
-        cpu = np.array([0.28, 3.12, 4.90, 6.57, 9.46, 14.66, 19.05, 21.29, 23, 23, 23, 23])
-        file_path += 'increase-no-change/'
-    if args.mapping == 1:
-        cpu = np.array([0.28, 3.12, 4.90, 6.57, 9.46, 14.66, 19.05, 21.29, 22.86, 23.08, 23.12, 23.29])
+    assert args.mapping in [-1, 0, 1, 2], 'invalid mapping'
+    if args.mapping == -1:
+        file_path += 'mmck/'
+    elif args.mapping == 0:
+        cpu = np.array([0.28, 3.12, 4.90, 6.57, 9.46, 14.66, 19.05, 21.29, 23, 23, 23, 23])  # offline test data1
+        file_path += 'increasing-stable/'
+    elif args.mapping == 1:
+        cpu = np.array([0.28, 3.12, 4.90, 6.57, 9.46, 14.66, 19.05, 21.29, 22.86, 23.08, 23.12, 23.29])  # offline test data2
         file_path += 'increasing/'
-    if args.mapping == 2:
-        cpu = np.array([0.28, 2.96, 4.74, 5.95, 8.63, 12.53, 15.16, 16.97, 20.70, 20.61, 17.31, 17.59])
+    else:
+        cpu = np.array([0.28, 2.96, 4.74, 5.95, 8.63, 12.53, 15.16, 16.97, 20.70, 20.61, 17.31, 17.59])  # offline test data3
         file_path += 'varying/'
     # queue_model = queue_model.QueueModel(con, cpu, total_load, args.delta_t, args.req_num, args.precision, args.error,
     #                                      args.interp_method, tqdm=args.tqdm)
-    queue_model = queue_model.QueueModelwithTruncation(con, cpu, total_load, args.delta_t, args.req_num,
-                                                       args.precision, args.interp_method, enable_tqdm=args.tqdm)
+    if args.mapping == -1:
+        queue_model = queue_model.QueueModelBasic(cpu_upper_bound=36, max_concurrency=con.max(), total_load=total_load,
+                                                  delta_t=args.delta_t, req_num=args.req_num, enable_tqdm=args.tqdm)
+    else:
+        queue_model = queue_model.QueueModelCustom(
+            concurrency=con, cpu_utl=cpu, total_load=total_load, delta_t=args.delta_t, req_num=args.req_num,
+            interp_method=args.interp_method, enable_tqdm=args.tqdm)
     file_name = f'{args.delta_t}-{args.req_num}-{int(total_load)}.txt'
-    queue_model.run(max_ql=args.max_queue_length, save_to_file=file_path + file_name)
+    queue_model.run(max_ql=args.max_queue_length, save_to_file=file_path + file_name, dry_run=args.dry_run,
+                    beginning_str=str(queue_model))

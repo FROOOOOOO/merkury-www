@@ -31,23 +31,3 @@ if __name__ == '__main__':
     if not args.ignore:
         for v in violations:
             print(v)
-    # mono_c_w, mono_c_w_q, mono_c_w_e, mono_f_w, mono_f_w_q, mono_f_w_e, violations = (
-    #     queue_model.check_monotonicity(args.file))
-    # if args.ind_var == '' or args.ind_var == 'c':
-    #     if mono_c_w:
-    #         print('W decreases monotonically with c*')
-    #     if mono_c_w_q:
-    #         print('W_q decreases monotonically with c*')
-    #     if mono_c_w_e:
-    #         print('W_e decreases monotonically with c*')
-    # if args.ind_var == '' or args.ind_var == 'f':
-    #     if mono_f_w:
-    #         print('W decreases monotonically with f*')
-    #     if mono_f_w_q:
-    #         print('W_q decreases monotonically with f*')
-    #     if mono_f_w_e:
-    #         print('W_e increases monotonically with f*')
-    # if not args.ignore and len(violations) > 0:
-    #     print('Violations:')
-    #     for v in violations:
-    #         print(v)
