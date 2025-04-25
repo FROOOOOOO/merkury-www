@@ -7,8 +7,8 @@ import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
 from core.utils import utils
 import core.utils.queue_model as uqm
-from core.load_fetcher import p99_fetcher, merkury_fetcher
-from core.recommender import ga_optimizer, predictor, simple_ga
+from core.load_fetcher import merkury_fetcher, p99_fetcher
+from core.recommender import ga_optimizer, custom_optimizer, predictor
 from core.queue_model import queue_model
 from core.updater import res_updater, tc_updater
 
@@ -69,10 +69,13 @@ class Recommender:
         self.mem_total = mem_total  # total memory of the node (unit: 10^6B)
         self.mem_request = mem_request
         self.buffer_size = buffer_size
-        if baseline in ['p99', 'tsp', 'weighted', 'evo-alg', 'merkury']:
+        if baseline in ['p99', 'tsp', 'weighted', 'merkury-new', 'merkury', 'ga', 'disable_fc', 'mmck', 'reactive']:
+            # ga -- simply utilize GA optimizer to allocate resource and fc param
+            # disable fc -- merkury w/o fc param update
+            # mmck -- replace queuing model with basic M/M/c/K
             self.baseline = baseline
         else:
-            self.baseline = 'ours'
+            self.baseline = 'merkury'
         if pred_model in ['latest', 'average', 'power_decay', 'exponential_decay', 'ARIMA', 'VARMA']:
             self.pred_model = pred_model
         else:
@@ -98,12 +101,20 @@ class Recommender:
         # load fetchers
         self.fetchers = {}
         for comp in self.co_located_components:
-            if self.baseline == 'p99':
-                self.fetchers[comp] = simple_fetcher.SimpleFetcher(
+            if self.baseline in ['p99', 'tsp']:
+                self.fetchers[comp] = p99_fetcher.P99Fetcher(
                     container=comp, node_name=self.master_name, node_addr=self.master_addr,
                     kubelet_port=self.ports[utils.KUBELET], enable_logging=self.enable_logging)
+            elif self.baseline == 'mmck':
+                default_concurrency = np.array([0, math.floor(self.cpu_total), math.floor(self.cpu_total) + 1])
+                default_cpu_utl = np.array([0, math.floor(self.cpu_total), self.cpu_total])
+                self.fetchers[comp] = merkury_fetcher.MerKuryFetcher(
+                    container=comp, node_name=self.master_name, node_addr=self.master_addr,
+                    kubelet_port=self.ports[utils.KUBELET], container_port=self.ports[comp],
+                    concurrency=default_concurrency, cpu_utl=default_cpu_utl,
+                    enable_logging=self.enable_logging)
             else:
-                self.fetchers[comp] = load_fetcher.LoadFetcher(
+                self.fetchers[comp] = merkury_fetcher.MerKuryFetcher(
                     container=comp, node_name=self.master_name, node_addr=self.master_addr,
                     kubelet_port=self.ports[utils.KUBELET], container_port=self.ports[comp],
                     concurrency=utils.CONCURRENCY_DICT[comp], cpu_utl=utils.CPU_UTL_DICT[comp],
@@ -111,21 +122,21 @@ class Recommender:
         # allocation weights, allocation_weights[code][comp] = w, if there are n co-located components, according to
         # whether each component is busy, code is an n-bit binary
         self.allocation_weights = utils.nested_dict()
-        if self.baseline == 'merkury':
+        if self.baseline in ['merkury', 'ga', 'disable_fc']:
             code_length = len(self.co_located_components)
             for i in range(int(2 ** code_length)):
                 binary_code = bin(i)[2:].zfill(code_length)
                 for comp in self.co_located_components:
                     self.allocation_weights[binary_code][comp] = 1.0
-        self.rs_updater = res_updater.ResourceUpdater(
+        self.res_updater = res_updater.ResourceUpdater(
             cpu_total=self.cpu_total, mem_total=self.mem_total, cpu_update_range=self.cpu_update_range,
             mem_update_range=self.mem_update_range, enable_logging=self.enable_logging)
         self.tc_updater = tc_updater.TcUpdater(enable_logging=self.enable_logging)
         self._scheduler = BackgroundScheduler()
         self.recommend_job = self._scheduler.add_job(
             self._recommend, trigger='interval', seconds=self.recommend_interval)
-        # self.load_query_job = self._scheduler.add_job(
-        #     self._load_query, trigger='interval', seconds=self.load_query_interval)
+        self.load_query_job = self._scheduler.add_job(
+            self._load_query, trigger='interval', seconds=self.load_query_interval)
 
     def __str__(self) -> str:
         return f'Recommender (node {self.master_name} ({self.master_addr}))'
@@ -134,16 +145,28 @@ class Recommender:
     def get_latest_recommendation(self) -> utils.RecommendationForNode | None:
         if len(self._recommendation_buffer) > 0:
             return self._recommendation_buffer[-1]
+        return None
 
     def get_latest_metrics(self):
         if len(self._metrics_buffer) > 0:
             return self._metrics_buffer[-1]
+        return None
 
     # prediction
     def predict_upcoming_metrics(self) -> None | dict | utils.KubeRequestsSummary:
         if len(self._metrics_buffer) == 0:
-            return
-        if self.baseline in ['weighted', 'ours']:
+            return None
+        if self.baseline == 'tsp':
+            data = {}
+            for comp in self.co_located_components:
+                data[f'{comp}_cpu'] = [metric[comp]['cpu'] for metric in self._metrics_buffer]
+                data[f'{comp}_memory'] = [metric[comp]['memory'] for metric in self._metrics_buffer]
+            timestamps = [metric['ts'] for metric in self._metrics_buffer]
+            tws = [metric['tw'] for metric in self._metrics_buffer]
+            pred, _ = predictor.Predictor(
+                data=data, start_timestamps=timestamps, time_windows=tws, model=self.pred_model).predict()
+            return pred
+        if self.baseline in ['weighted', 'merkury', 'ga', 'disable_fc']:
             data = {}
             for comp in utils.CONTROL_PLANE_COMPONENTS:
                 data[f'{comp}_req_num'] = [krs.get_req_num(comp) for krs in self._metrics_buffer]
@@ -156,7 +179,7 @@ class Recommender:
             pred, tw = predictor.Predictor(
                 data=data, start_timestamps=timestamps, time_windows=tws, model=self.pred_model).predict()
             if pred is None:
-                return
+                return None
             # scheduler load calibration to avoid classifying scheduler whose req_num == 0 but req_in_queue > 0
             # into idle components mistakenly
             if utils.KUBE_SCHEDULER in self.co_located_components:
@@ -204,6 +227,7 @@ class Recommender:
             utils.logging_or_print(f'{str(self)}: prediction of upcoming metrics - {str(krs)}',
                                    enable_logging=self.enable_logging, level=logging.INFO)
             return krs
+        return None
 
     def _recommend_p99(self):
         start = time.time()
@@ -274,7 +298,51 @@ class Recommender:
             mem_alloc[comp] = int(mem_alloc[comp])
         self._generate_final_recommendation(start, cpu_alloc, mem_alloc)
 
-    def _recommend_evo_alg(self, strategy_gus: str = 'balance', strategy_lus: str = 'optimistic'):
+    def _recommend_reactive(self, cpu_threshold: float = 0.8, mem_threshold: float = 0.8):
+        """
+        reactive strategy: no prediction, only based on CPU load
+        for components whose CPU load is greater than load_threshold * CPU limit, allocate CPU load / cpu_threshold
+        for other components, do nothing
+        for memory, the strategy is the same
+        :param cpu_threshold: hyperparameter for CPU, default 0.8
+        :param mem_threshold: hyperparameter for memory, default 0.8
+        :return:
+        """
+        start = time.time()
+        cpu_alloc, mem_alloc = {}, {}
+        for comp in self.co_located_components:
+            cpu_limit, mem_limit = self.res_updater.get_pod_limit(
+                component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0')
+            _, tw, load = self.fetchers[comp].get_load()
+            cpu_load = load.req_load.cpu_load / tw
+            mem_load = self.fetchers[comp].get_mem_baseline()
+            # cpu
+            if cpu_limit is None:  # no limit -> set limit = total cpu
+                cpu_alloc[comp] = int(self.cpu_total * 1000)
+            else:
+                cpu_threshold = cpu_limit * cpu_threshold
+                if cpu_load > cpu_threshold:
+                    cpu_alloc[comp] = int(min(self.cpu_total * 1000, cpu_load / cpu_threshold))
+                else:
+                    cpu_alloc[comp] = cpu_limit
+            # mem
+            if mem_limit is None:
+                mem_alloc[comp] = self.mem_total
+            elif self.disable_mem_alloc:
+                mem_alloc[comp] = self.mem_total
+            else:
+                mem_threshold = mem_limit * mem_threshold
+                if mem_load > mem_threshold:
+                    mem_alloc[comp] = int(min(self.mem_total, mem_load / mem_threshold))
+                else:
+                    mem_alloc[comp] = mem_limit
+        self._generate_final_recommendation(start, cpu_alloc, mem_alloc)
+
+    # ---DEPRECATED---
+    def _recommend_merkury(self, strategy_ss: str = 'ga', strategy_gus: str = 'balance',
+                           strategy_lus: str = 'optimistic'):
+        if strategy_ss not in ['ga', 'weighted_num', 'weighted_load']:  # steady state optimization strategy
+            strategy_ss = 'ga'  # genetic algorithm as default
         if strategy_gus not in ['greedy', 'balance']:
             strategy_gus = 'balance'  # global unsteady state optimization strategy: total CPU <= total CPU load
         if strategy_lus not in ['optimistic', 'pessimistic']:
@@ -336,32 +404,47 @@ class Recommender:
         for comp in busy_components:
             _, x, y = self.fetchers[comp].get_cpu_con_mapping()
             concurrency_rec[comp] = uqm.get_concurrency_rec(x, y)
-            qm[comp] = queue_model.QueueModelwithTruncation(
+            qm[comp] = queue_model.QueueModelCustom(
                 concurrency=x, cpu_utl=y, total_load=upcoming_kube_requests.get_cpu_load(comp),
                 delta_t=upcoming_kube_requests.time_window, req_num=upcoming_kube_requests.get_req_num(comp))
         req_num = {comp: upcoming_kube_requests.get_req_num(comp) for comp in busy_components}
         # 3.3 CPU allocation
         if steady_state:
-            ga = simple_ga.SimpleGA(cpu_total=cpu_left, queue_models=qm, weights=self.allocation_weights,
-                                    cpu_granularity=50)
-            f_c_q_alloc, _, _ = ga.run()
-            if f_c_q_alloc is None:
-                utils.logging_or_print(
-                    f'{str(self)}: GA optimizer failed to allocate CPU, '
-                    f'degenerate to allocate CPU according to #req.',
-                    enable_logging=self.enable_logging, level=logging.WARNING)
-                # degenerate to 'weighted num'
-                cpu_alloc_temp = self._alloc_resource_according_to_weights(
-                    weights=req_num, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
+            if strategy_ss == 'weighted_load' or strategy_ss == 'weighted_num':
+                if strategy_ss == 'weighted_load':
+                    cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                        weights=cpu_lb, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
+                else:
+                    cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                        weights=req_num, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
                 for comp in busy_components:
                     cpu_alloc[comp] = cpu_alloc_temp[comp]
                     cpu_left -= cpu_alloc[comp]
                     ql_rec[comp] = qm[comp].get_ql_rec(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
-            else:
-                for comp in busy_components:
-                    cpu_alloc[comp] = f_c_q_alloc[comp][1]
-                    cpu_left -= cpu_alloc[comp]
-                    ql_rec[comp] = f_c_q_alloc[comp][2]
+            if strategy_ss == 'ga':
+                adaptive_granularity = max(1, int(utils.GA_TIME_LIMIT / utils.GA_TIME_SPACE_RATIO /
+                                                  (cpu_left - sum([cpu_lb[comp] for comp in busy_components]))))
+                ga = ga_optimizer.GAOptimizer(
+                    cpu_total=cpu_left, queue_models=qm, weights=self.allocation_weights,
+                    cpu_granularity=adaptive_granularity)
+                f_c_q_alloc, _, _ = ga.run()
+                if f_c_q_alloc is None:
+                    utils.logging_or_print(
+                        f'{str(self)}: GA optimizer failed to allocate CPU, '
+                        f'degenerate to allocate CPU according to #req.',
+                        enable_logging=self.enable_logging, level=logging.WARNING)
+                    # degenerate to 'weighted num'
+                    cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                        weights=req_num, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
+                    for comp in busy_components:
+                        cpu_alloc[comp] = cpu_alloc_temp[comp]
+                        cpu_left -= cpu_alloc[comp]
+                        ql_rec[comp] = qm[comp].get_ql_rec(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                else:
+                    for comp in busy_components:
+                        cpu_alloc[comp] = f_c_q_alloc[comp][1]
+                        cpu_left -= cpu_alloc[comp]
+                        ql_rec[comp] = f_c_q_alloc[comp][2]
         elif steady_state_global:  # only local unsteady
             if len(unsteady_components) == len(busy_components):  # all components are local unsteady
                 cpu_alloc_temp = self._alloc_resource_according_to_weights(
@@ -385,8 +468,11 @@ class Recommender:
                                              upcoming_kube_requests.get_cpu_load(comp))
                 # use GA to allocate CPU for other components (if failed to solve, degenerate to weighted num)
                 qm_ss = {comp: qm[comp] for comp in busy_components if comp not in unsteady_components}
-                ga = simple_ga.SimpleGA(cpu_total=cpu_left, queue_models=qm_ss, weights=self.allocation_weights,
-                                        cpu_request=self.cpu_request, cpu_granularity=50)
+                adaptive_granularity = max(1, int(utils.GA_TIME_LIMIT / utils.GA_TIME_SPACE_RATIO /
+                                                  (cpu_left - sum([cpu_lb[comp] for comp in qm_ss.keys()]))))
+                ga = ga_optimizer.GAOptimizer(
+                    cpu_total=cpu_left, queue_models=qm_ss, weights=self.allocation_weights,
+                    cpu_request=self.cpu_request, cpu_granularity=adaptive_granularity)
                 f_c_q_alloc, _, _ = ga.run()
                 if f_c_q_alloc is None:
                     utils.logging_or_print(
@@ -481,8 +567,376 @@ class Recommender:
         self._generate_final_recommendation(
             ts=start, cpu_alloc=cpu_alloc, mem_alloc=mem_alloc, concurrency_rec=concurrency_rec, ql_rec=ql_rec)
 
-    def _recommend_merkury(self, brute_force: bool = False, disable_fc: bool = False, strategy_gus: str = 'balance',
-                        strategy_lus: str = 'optimistic') -> (bool, utils.KubeRequestsSummary):
+    def _recommend_ga(self):
+        start = time.time()
+        concurrency_rec, ql_rec = {}, {}
+        cpu_alloc, mem_alloc = {}, {}
+        for comp in self.co_located_components:
+            concurrency_rec[comp], ql_rec[comp], cpu_alloc[comp], mem_alloc[comp] = 0, 0, 0, 0
+            if self.disable_mem_alloc:
+                mem_alloc[comp] = self.mem_total
+        # 1. predict req_num and req_load
+        upcoming_kube_requests = self.predict_upcoming_metrics()
+        if upcoming_kube_requests is None:
+            utils.logging_or_print(f'{str(self)}: no request load available, recommendation canceled.',
+                                   enable_logging=self.enable_logging, level=logging.WARNING)
+            return
+        if not self._load_check(prediction=upcoming_kube_requests, ts=start):
+            return
+        cpu_left = self.cpu_total
+        mem_left = self.mem_total
+        idle_components, busy_components = self._get_idle_and_busy_components(upcoming_kube_requests)
+        # 2. allocate resources for idle components (controller-manager, scheduler)
+        latest_recommendation = self.get_latest_recommendation()
+        for comp in idle_components:
+            # f*, q* unchanged (if last recommendation unavailable, f* = min(argmax_x(f(x))), q* = 1)
+            if latest_recommendation is not None and comp in latest_recommendation.recommendations.keys():
+                concurrency_rec[comp] = latest_recommendation.recommendations[comp].concurrency
+                ql_rec[comp] = latest_recommendation.recommendations[comp].max_ql
+            else:
+                _, x, y = self.fetchers[comp].get_cpu_con_mapping()
+                concurrency_rec[comp] = uqm.get_concurrency_rec(x, y)
+                ql_rec[comp] = 1
+            # c* = c_0, m* = m_0
+            c_0 = self.fetchers[comp].get_cpu_baseline()
+            if comp in self.cpu_request and self.cpu_request[comp] > c_0 * utils.AMPLIFIER:
+                cpu_alloc[comp] = self.cpu_request[comp]
+            else:
+                cpu_alloc[comp] = c_0 * utils.AMPLIFIER
+            cpu_left -= cpu_alloc[comp]
+            if not self.disable_mem_alloc:
+                m_0 = self.fetchers[comp].get_mem_baseline()
+                if comp in self.mem_request and self.mem_request[comp] > m_0 * utils.AMPLIFIER:
+                    mem_alloc[comp] = self.mem_request[comp]
+                else:
+                    mem_alloc[comp] = m_0 * utils.AMPLIFIER
+                mem_left -= mem_alloc[comp]
+        cpu_lb, cpu_ub = {}, {}
+        for comp in busy_components:
+            cpu_lb[comp] = upcoming_kube_requests.get_cpu_load(comp) / (1000 * upcoming_kube_requests.time_window)
+            cpu_ub[comp] = self.fetchers[comp].get_y_max()
+        # 3. get concurrency from Prometheus
+        default_concurrency = 600
+        max_concurrency = (self.fetchers[utils.KUBE_APISERVER].
+                           query_max_concurrency(timestamp=int(start)))
+        if max_concurrency is not None:
+            default_concurrency = max_concurrency
+        # 4. allocate resources for other components
+        # 4.1 check whether steady-state for every component can be met
+        steady_state, steady_state_global, steady_state_local, unsteady_components = (
+            self._steady_state_check(busy_components, cpu_left, cpu_lb, cpu_ub))
+        # 4.2 f*, c*, q* allocation
+        qm = {}
+        for comp in busy_components:
+            _, x, y = self.fetchers[comp].get_cpu_con_mapping()
+            qm[comp] = queue_model.QueueModelCustom(concurrency=x, cpu_utl=y,
+                                                    total_load=upcoming_kube_requests.get_cpu_load(comp),
+                                                    delta_t=upcoming_kube_requests.time_window,
+                                                    req_num=upcoming_kube_requests.get_req_num(comp))
+        req_num = {comp: upcoming_kube_requests.get_req_num(comp) for comp in busy_components}
+        if steady_state:
+            ga = ga_optimizer.GAOptimizer(
+                cpu_total=cpu_left, queue_models=qm, weights=self.allocation_weights, brute_force=True)
+            f_c_q_alloc, _, _ = ga.run()
+            if f_c_q_alloc is None:
+                utils.logging_or_print(
+                    f'{str(self)}: GA optimizer failed to allocate CPU, '
+                    f'degenerate to allocate CPU according to #req.',
+                    enable_logging=self.enable_logging, level=logging.WARNING)
+                # degenerate to 'weighted num'
+                cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                    weights=req_num, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
+                for comp in busy_components:
+                    cpu_alloc[comp] = cpu_alloc_temp[comp]
+                    cpu_left -= cpu_alloc[comp]
+                    concurrency_rec[comp] = default_concurrency
+                    ql_rec[comp] = qm[comp].get_ql_rec(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+            else:
+                for comp in busy_components:
+                    concurrency_rec[comp] = f_c_q_alloc[comp][0]
+                    cpu_alloc[comp] = f_c_q_alloc[comp][1]
+                    cpu_left -= cpu_alloc[comp]
+                    ql_rec[comp] = f_c_q_alloc[comp][2]
+        elif steady_state_global:  # only local unsteady
+            if len(unsteady_components) == len(busy_components):  # all components are local unsteady
+                cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                    weights=req_num, lower_bounds=self.cpu_request, allocatable=cpu_left, re_alloc=False)
+                for comp in unsteady_components:
+                    concurrency_rec[comp] = default_concurrency
+                    cpu_alloc[comp] = cpu_alloc_temp[comp]
+                    cpu_left -= cpu_alloc[comp]
+                    load_left = qm[comp].calc_load_left(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                    ql_rec[comp] = math.ceil(upcoming_kube_requests.get_req_num(comp) * float(load_left) /
+                                             upcoming_kube_requests.get_cpu_load(comp))
+            else:  # only some component(s) is(are) local unsteady
+                # allocate f, c, q for unsteady components
+                for comp in unsteady_components:
+                    concurrency_rec[comp] = default_concurrency
+                    cpu_alloc[comp] = max(self.cpu_request[comp], cpu_lb[comp])  # optimistic by default
+                    cpu_left -= cpu_alloc[comp]
+                    load_left = qm[comp].calc_load_left(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                    ql_rec[comp] = math.ceil(upcoming_kube_requests.get_req_num(comp) * float(load_left) /
+                                             upcoming_kube_requests.get_cpu_load(comp))
+                # use GA to allocate CPU for other components (if failed to solve, degenerate to weighted num)
+                qm_ss = {comp: qm[comp] for comp in busy_components if comp not in unsteady_components}
+                ga = ga_optimizer.GAOptimizer(
+                    cpu_total=cpu_left, queue_models=qm_ss, weights=self.allocation_weights,
+                    cpu_request=self.cpu_request, brute_force=True)
+                f_c_q_alloc, _, _ = ga.run()
+                if f_c_q_alloc is None:
+                    utils.logging_or_print(
+                        f'{str(self)}: GA optimizer failed to allocate CPU, '
+                        f'degenerate to allocate CPU according to #req.',
+                        enable_logging=self.enable_logging, level=logging.WARNING)
+                    # degenerate to 'weighted num'
+                    req_num_ss = {comp: req_num[comp] for comp in busy_components if comp in qm_ss}
+                    cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                        weights=req_num_ss, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left,
+                        re_alloc=True)
+                    for comp in qm_ss:
+                        concurrency_rec[comp] = default_concurrency
+                        cpu_alloc[comp] = cpu_alloc_temp[comp]
+                        cpu_left -= cpu_alloc[comp]
+                        ql_rec[comp] = qm[comp].get_ql_rec(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                else:
+                    for comp in qm_ss:
+                        concurrency_rec[comp] = f_c_q_alloc[comp][0]
+                        cpu_alloc[comp] = f_c_q_alloc[comp][1]
+                        cpu_left -= cpu_alloc[comp]
+                        ql_rec[comp] = f_c_q_alloc[comp][2]
+        else:  # global unsteady
+            cpu_alloc = self._alloc_resource_according_to_weights(
+                weights={comp: cpu_lb[comp] for comp in busy_components}, lower_bounds=self.cpu_request,
+                upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=False)
+            # f*, q*
+            for comp in busy_components:
+                concurrency_rec[comp] = default_concurrency
+                if qm[comp].meet_steady_state_condition(cpu_alloc=cpu_alloc[comp], flow_ctrl=concurrency_rec[comp]):
+                    ql_rec[comp] = qm[comp].get_ql_rec(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                else:
+                    load_left = qm[comp].calc_load_left(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp])
+                    ql_rec[comp] = math.ceil(upcoming_kube_requests.get_req_num(comp) * float(load_left) /
+                                             upcoming_kube_requests.get_cpu_load(comp))
+        # final cpu allocation
+        if cpu_left > 0:
+            second_alloc = self._alloc_resource_according_to_weights(
+                weights={comp: cpu_lb[comp] for comp in busy_components}, allocatable=cpu_left,
+                lower_bounds={comp: 0 for comp in busy_components}, re_alloc=False)
+            for comp in busy_components:
+                cpu_alloc[comp] += second_alloc[comp]
+        # 4.3 m* = m_min,i * M/m_min
+        m0, mem_est = {}, {}
+        mem_est_total = 0
+        for comp in busy_components:
+            m0[comp] = self.fetchers[comp].get_mem_baseline()
+            if qm[comp].meet_steady_state_condition(cpu_alloc=cpu_alloc[comp], flow_ctrl=concurrency_rec[comp],
+                                                    max_ql=ql_rec[comp]):
+                sl = qm[comp].calc_l(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp], max_ql=ql_rec[comp])
+                l_q = qm[comp].calc_l_q(flow_ctrl=concurrency_rec[comp], cpu_alloc=cpu_alloc[comp], max_ql=ql_rec[comp])
+            else:
+                sl = concurrency_rec[comp] + ql_rec[comp]
+                l_q = ql_rec[comp]
+            m_e = upcoming_kube_requests.get_memory_load_e(comp) / upcoming_kube_requests.get_req_num(comp)
+            m_q = upcoming_kube_requests.get_memory_load_q(comp) / upcoming_kube_requests.get_req_num(comp)
+            mem_est[comp] = m0[comp] + float(l_q) * m_q + float(sl - l_q) * m_e
+            mem_est_total += mem_est[comp]
+        if mem_est_total >= mem_left:
+            if self.disable_mem_alloc:
+                mem_total = mem_est_total
+            else:
+                mem_total = mem_est_total + sum(mem_alloc.values())
+            utils.logging_or_print(f'{str(self)}: high risk of OOM (total memory: {self.mem_total}MB, '
+                                   f'estimated memory: {mem_total}MB).',
+                                   enable_logging=self.enable_logging, level=logging.WARNING)
+        if not self.disable_mem_alloc:
+            for comp in busy_components:
+                if comp in self.mem_request:
+                    mem_left -= self.mem_request[comp]
+            for comp in busy_components:
+                mem_alloc[comp] = mem_left * mem_est[comp] / mem_est_total
+                if comp in self.mem_request:
+                    mem_alloc[comp] += self.mem_request[comp]
+        # unit transformation
+        for comp in self.co_located_components:
+            cpu_alloc[comp] = int(cpu_alloc[comp] * 1000)
+            mem_alloc[comp] = int(mem_alloc[comp])
+        # 5. generate final recommendation
+        self._generate_final_recommendation(
+            ts=start, cpu_alloc=cpu_alloc, mem_alloc=mem_alloc, concurrency_rec=concurrency_rec, ql_rec=ql_rec)
+
+    def _recommend_disable_fc(self):
+        start = time.time()
+        cpu_alloc, mem_alloc = {}, {}
+        for comp in self.co_located_components:
+            cpu_alloc[comp], mem_alloc[comp] = 0, 0
+            if self.disable_mem_alloc:
+                mem_alloc[comp] = self.mem_total
+        # 1. predict req_num and req_load
+        upcoming_kube_requests = self.predict_upcoming_metrics()
+        if upcoming_kube_requests is None:
+            utils.logging_or_print(f'{str(self)}: no request load available, recommendation canceled.',
+                                   enable_logging=self.enable_logging, level=logging.WARNING)
+            return
+        if not self._load_check(prediction=upcoming_kube_requests, ts=start):
+            return
+        cpu_left = self.cpu_total
+        mem_left = self.mem_total
+        idle_components, busy_components = self._get_idle_and_busy_components(upcoming_kube_requests)
+        # 2. allocate resources for idle components (controller-manager, scheduler)
+        for comp in idle_components:
+            # c* = c_0, m* = m_0
+            c_0 = self.fetchers[comp].get_cpu_baseline()
+            if comp in self.cpu_request and self.cpu_request[comp] > c_0 * utils.AMPLIFIER:
+                cpu_alloc[comp] = self.cpu_request[comp]
+            else:
+                cpu_alloc[comp] = c_0 * utils.AMPLIFIER
+            cpu_left -= cpu_alloc[comp]
+            if not self.disable_mem_alloc:
+                m_0 = self.fetchers[comp].get_mem_baseline()
+                if comp in self.mem_request and self.mem_request[comp] > m_0 * utils.AMPLIFIER:
+                    mem_alloc[comp] = self.mem_request[comp]
+                else:
+                    mem_alloc[comp] = m_0 * utils.AMPLIFIER
+                mem_left -= mem_alloc[comp]
+        cpu_lb, cpu_ub = {}, {}
+        for comp in busy_components:
+            cpu_lb[comp] = upcoming_kube_requests.get_cpu_load(comp) / (1000 * upcoming_kube_requests.time_window)
+            cpu_ub[comp] = self.fetchers[comp].get_y_max()
+        # 3. get concurrency from Prometheus
+        default_concurrency = 600
+        max_concurrency = self.fetchers[utils.KUBE_APISERVER].query_max_concurrency(timestamp=int(start))
+        if max_concurrency is not None:
+            default_concurrency = max_concurrency
+        # 4. allocate resources for other components
+        # 4.1 check whether steady-state for every component can be met
+        steady_state, steady_state_global, steady_state_local, unsteady_components = (
+            self._steady_state_check(busy_components, cpu_left, cpu_lb, cpu_ub))
+        # 4.2 CPU allocation
+        qm = {}
+        for comp in busy_components:
+            _, x, y = self.fetchers[comp].get_cpu_con_mapping()
+            qm[comp] = queue_model.QueueModelCustom(
+                concurrency=x, cpu_utl=y, total_load=upcoming_kube_requests.get_cpu_load(comp),
+                delta_t=upcoming_kube_requests.time_window, req_num=upcoming_kube_requests.get_req_num(comp))
+        req_num = {comp: upcoming_kube_requests.get_req_num(comp) for comp in busy_components}
+        if steady_state:
+            adaptive_granularity = max(1, int(utils.GA_TIME_LIMIT / utils.GA_TIME_SPACE_RATIO /
+                                              (cpu_left - sum([cpu_lb[comp] for comp in busy_components]))))
+            ga = ga_optimizer.GAOptimizer(
+                cpu_total=cpu_left, queue_models=qm, weights=self.allocation_weights,
+                cpu_granularity=adaptive_granularity, disable_fc=True, default_concurrency=default_concurrency)
+            f_c_q_alloc, _, _ = ga.run()
+            if f_c_q_alloc is None:
+                utils.logging_or_print(
+                    f'{str(self)}: GA optimizer failed to allocate CPU, '
+                    f'degenerate to allocate CPU according to #req.',
+                    enable_logging=self.enable_logging, level=logging.WARNING)
+                # degenerate to 'weighted num'
+                cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                    weights=req_num, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=True)
+                for comp in busy_components:
+                    cpu_alloc[comp] = cpu_alloc_temp[comp]
+                    cpu_left -= cpu_alloc[comp]
+            else:
+                for comp in busy_components:
+                    cpu_alloc[comp] = f_c_q_alloc[comp][1]
+                    cpu_left -= cpu_alloc[comp]
+        elif steady_state_global:  # only local unsteady
+            if len(unsteady_components) == len(busy_components):  # all components are local unsteady
+                cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                    weights=req_num, lower_bounds=self.cpu_request, allocatable=cpu_left, re_alloc=False)
+                for comp in unsteady_components:
+                    cpu_alloc[comp] = cpu_alloc_temp[comp]
+                    cpu_left -= cpu_alloc[comp]
+            else:  # only some component(s) is(are) local unsteady
+                # allocate CPU and q for unsteady components
+                for comp in unsteady_components:
+                    cpu_alloc[comp] = max(self.cpu_request[comp], cpu_lb[comp])  # optimistic by default
+                    cpu_left -= cpu_alloc[comp]
+                # use GA to allocate CPU for other components (if failed to solve, degenerate to weighted num)
+                qm_ss = {comp: qm[comp] for comp in busy_components if comp not in unsteady_components}
+                adaptive_granularity = max(1, int(utils.GA_TIME_LIMIT / utils.GA_TIME_SPACE_RATIO /
+                                                  (cpu_left - sum([cpu_lb[comp] for comp in qm_ss.keys()]))))
+                ga = ga_optimizer.GAOptimizer(
+                    cpu_total=cpu_left, queue_models=qm_ss, weights=self.allocation_weights,
+                    cpu_granularity=adaptive_granularity, disable_fc=True, default_concurrency=default_concurrency)
+                f_c_q_alloc, _, _ = ga.run()
+                if f_c_q_alloc is None:
+                    utils.logging_or_print(
+                        f'{str(self)}: GA optimizer failed to allocate CPU, '
+                        f'degenerate to allocate CPU according to #req.',
+                        enable_logging=self.enable_logging, level=logging.WARNING)
+                    # degenerate to 'weighted num'
+                    req_num_ss = {comp: req_num[comp] for comp in busy_components if comp in qm_ss}
+                    cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                        weights=req_num_ss, lower_bounds=cpu_lb, upper_bounds=cpu_ub, allocatable=cpu_left,
+                        re_alloc=True)
+                    for comp in qm_ss:
+                        cpu_alloc[comp] = cpu_alloc_temp[comp]
+                        cpu_left -= cpu_alloc[comp]
+                else:
+                    for comp in qm_ss:
+                        cpu_alloc[comp] = f_c_q_alloc[comp][1]
+                        cpu_left -= cpu_alloc[comp]
+        else:  # global unsteady: use 'balance' strategy by default
+            cpu_alloc_temp = self._alloc_resource_according_to_weights(
+                weights={comp: cpu_lb[comp] for comp in busy_components}, lower_bounds=self.cpu_request,
+                upper_bounds=cpu_ub, allocatable=cpu_left, re_alloc=False)
+            for comp in busy_components:
+                cpu_alloc[comp] = cpu_alloc_temp[comp]
+                cpu_left -= cpu_alloc[comp]
+        # final cpu allocation
+        if cpu_left > 0:
+            second_alloc = self._alloc_resource_according_to_weights(
+                weights={comp: cpu_lb[comp] for comp in busy_components}, allocatable=cpu_left,
+                lower_bounds={comp: 0 for comp in busy_components}, re_alloc=False)
+            for comp in busy_components:
+                cpu_alloc[comp] += second_alloc[comp]
+        # 4.3 m* = m_min,i * M/m_min
+        m0, mem_est = {}, {}
+        mem_est_total = 0
+        for comp in busy_components:
+            m0[comp] = self.fetchers[comp].get_mem_baseline()
+            if qm[comp].meet_steady_state_condition(cpu_alloc=cpu_alloc[comp], flow_ctrl=default_concurrency,
+                                                    max_ql=utils.DEFAULT_QUEUE_LENGTH):
+                sl = qm[comp].calc_l(flow_ctrl=default_concurrency, cpu_alloc=cpu_alloc[comp],
+                                     max_ql=utils.DEFAULT_QUEUE_LENGTH)
+                l_q = qm[comp].calc_l_q(flow_ctrl=default_concurrency, cpu_alloc=cpu_alloc[comp],
+                                        max_ql=utils.DEFAULT_QUEUE_LENGTH)
+            else:
+                sl = default_concurrency
+                l_q = utils.DEFAULT_QUEUE_LENGTH
+            m_e = upcoming_kube_requests.get_memory_load_e(comp) / upcoming_kube_requests.get_req_num(comp)
+            m_q = upcoming_kube_requests.get_memory_load_q(comp) / upcoming_kube_requests.get_req_num(comp)
+            mem_est[comp] = m0[comp] + float(l_q) * m_q + float(sl - l_q) * m_e
+            mem_est_total += mem_est[comp]
+        if mem_est_total >= mem_left:
+            if self.disable_mem_alloc:
+                mem_total = mem_est_total
+            else:
+                mem_total = mem_est_total + sum(mem_alloc.values())
+            utils.logging_or_print(
+                f'{str(self)}: high risk of OOM (total memory: {self.mem_total}MB, estimated memory: '
+                f'{mem_total}MB).', enable_logging=self.enable_logging, level=logging.WARNING)
+        if not self.disable_mem_alloc:
+            for comp in busy_components:
+                if comp in self.mem_request:
+                    mem_left -= self.mem_request[comp]
+            for comp in busy_components:
+                mem_alloc[comp] = mem_left * mem_est[comp] / mem_est_total
+                if comp in self.mem_request:
+                    mem_alloc[comp] += self.mem_request[comp]
+        # unit transformation
+        for comp in self.co_located_components:
+            cpu_alloc[comp] = int(cpu_alloc[comp] * 1000)
+            mem_alloc[comp] = int(mem_alloc[comp])
+        # 5. generate final recommendation
+        self._generate_final_recommendation(ts=start, cpu_alloc=cpu_alloc, mem_alloc=mem_alloc)
+
+    # ---END DEPRECATED---
+
+    def _recommend_merkury_new(self, brute_force: bool = False, disable_fc: bool = False, strategy_gus: str = 'balance',
+                               strategy_lus: str = 'optimistic') -> (bool, utils.KubeRequestsSummary):
         """
         MerKury recommendation algorithm
         :param brute_force: whether using brute-force algorithm in optimizer
@@ -624,14 +1078,14 @@ class Recommender:
                     n_rbi = apiserver_stats.get_req_scheduler()
                     n_ri = apiserver_stats.get_req_num()
                     scale_factor = 1 + (min(n_q / n_r, cpu_scheduler * delta_t / c) - 1) * n_rbi / n_ri
-                    qm_apiserver = queue_model.QueueModelwithTruncation(
+                    qm_apiserver = queue_model.QueueModelCustom(
                         concurrency=concurrency, cpu_utl=cpu_utl,
                         total_load=apiserver_stats.get_cpu_load() * scale_factor,
                         req_num=int(apiserver_stats.get_req_num() * scale_factor),
                         delta_t=apiserver_stats.get_delta_t()
                     )
                 else:
-                    qm_apiserver = queue_model.QueueModelwithTruncation(
+                    qm_apiserver = queue_model.QueueModelCustom(
                         concurrency=concurrency, cpu_utl=cpu_utl,
                         total_load=apiserver_stats.get_cpu_load(),
                         req_num=apiserver_stats.get_req_num(),
@@ -683,7 +1137,7 @@ class Recommender:
             cpu_allocatable_for_opt = cpu_allocatable
             if utils.KUBE_CONTROLLER_MANAGER in steady_components:
                 cpu_allocatable_for_opt -= cpu_lb[utils.KUBE_CONTROLLER_MANAGER]
-            opt = ga_optimizer.Optimizer(
+            opt = custom_optimizer.Optimizer(
                 cpu_total=cpu_allocatable_for_opt, cpu_request=self.cpu_request, cpu_granularity=adaptive_granularity,
                 component_stats={comp: comp_stats[comp] for comp in steady_components
                                  if comp not in [utils.KUBE_SCHEDULER,
@@ -818,14 +1272,14 @@ class Recommender:
                     n_rbi = comp_stats[comp].get_req_scheduler()
                     n_ri = comp_stats[comp].get_req_num()
                     scale_factor = 1 + (min(n_q / n_r, c_rec[utils.KUBE_SCHEDULER] * delta_t / c) - 1) * n_rbi / n_ri
-                    qm = queue_model.QueueModelwithTruncation(
+                    qm = queue_model.QueueModelCustom(
                         concurrency=concurrency, cpu_utl=cpu_utl,
                         total_load=comp_stats[comp].get_cpu_load() * scale_factor,
                         req_num=int(comp_stats[comp].get_req_num() * scale_factor),
                         delta_t=comp_stats[comp].get_delta_t()
                     )
                 else:
-                    qm = queue_model.QueueModelwithTruncation(
+                    qm = queue_model.QueueModelCustom(
                         concurrency=concurrency, cpu_utl=cpu_utl,
                         total_load=comp_stats[comp].get_cpu_load(),
                         req_num=comp_stats[comp].get_req_num(),
@@ -986,19 +1440,26 @@ class Recommender:
         # 3. resource and fc allocation
         allocated = False
         upcoming_kube_requests = None
-        if self.baseline == 'merkury':
-            allocated, upcoming_kube_requests = self._recommend_merkury()
-        elif self.baseline == 'evo-alg':
-            self._recommend_evo_alg()
+        if self.baseline in ['merkury', 'mmck']:
+            # self._recommend_merkury()
+            allocated, upcoming_kube_requests = self._recommend_merkury_new()
+        elif self.baseline == 'ga':
+            # self._recommend_ga()
+            allocated, upcoming_kube_requests = self._recommend_merkury_new(brute_force=True)
+        elif self.baseline == 'disable_fc':
+            # self._recommend_disable_fc()
+            allocated, upcoming_kube_requests = self._recommend_merkury_new(disable_fc=True)
         elif self.baseline == 'p99':
             self._recommend_p99()
         elif self.baseline == 'tsp':
             self._recommend_tsp()
         elif self.baseline == 'weighted':
             self._recommend_weighted()
+        elif self.baseline == 'reactive':
+            self._recommend_reactive()
         else:
             return
-        if self.baseline == 'merkury' and self.alloc_calibration and allocated:
+        if self.baseline in ['merkury', 'ga', 'disable_fc', 'mmck'] and self.alloc_calibration and allocated:
             time.sleep(self.recommend_interval / 2)
             self._allocation_calibrate(upcoming_kube_requests)
 
@@ -1088,7 +1549,7 @@ class Recommender:
                 enable_logging=self.enable_logging, level=logging.INFO)
             if not self.dry_run:
                 for comp in self.co_located_components:
-                    self.rs_updater.update_resource_with_k8s_client(
+                    self.res_updater.update_resource_with_k8s_client(
                         component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0',
                         cpu_value=int(self.cpu_total * 1000), memory_value=self.mem_total, ignore_update_range=True)
             end = time.time()
@@ -1173,14 +1634,14 @@ class Recommender:
         if not self.dry_run:
             # update resource
             for comp in self.co_located_components:
-                self.rs_updater.update_resource_with_k8s_client(
+                self.res_updater.update_resource_with_k8s_client(
                     component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0',
                     cpu_value=cpu_alloc[comp], memory_value=mem_alloc[comp],
                     ignore_update_range=self.last_state_recommended is False)
             if (concurrency_rec is not None and ql_rec is not None and self.is_master and
                     utils.KUBE_APISERVER in self.co_located_components):
                 # update FC params
-                self.tc_updater.update_fc_with_k8s_client(
+                self.tc_updater.update_tc_with_k8s_client(
                     concurrency=concurrency_rec[utils.KUBE_APISERVER], queue_length=ql_rec[utils.KUBE_APISERVER])
             update_end = time.time()
             update_time = update_end - rec_end
@@ -1196,7 +1657,7 @@ class Recommender:
         cpu_limit = {comp: None for comp in self.co_located_components}
         have_limit = True
         for comp in self.co_located_components:
-            cpu_limit[comp], _ = self.rs_updater.get_pod_limit(
+            cpu_limit[comp], _ = self.res_updater.get_pod_limit(
                 component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0')
             if cpu_limit[comp] is None:
                 have_limit = False
@@ -1232,14 +1693,14 @@ class Recommender:
                 lendable_cpu = int(utils.LENDABLE_PERCENTAGE * cpu_limit[comp])
                 available_cpu += lendable_cpu
                 cpu_limit[comp] -= lendable_cpu
-                self.rs_updater.update_resource_with_k8s_client(
+                self.res_updater.update_resource_with_k8s_client(
                     component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0', cpu_value=cpu_limit[comp])
             bottleneck_throttle = 0.0
             for comp in bottleneck_components:
                 bottleneck_throttle += cpu_throttle[comp]
             for comp in bottleneck_components:
                 cpu_limit[comp] += int(available_cpu * cpu_throttle[comp] / bottleneck_throttle)
-                self.rs_updater.update_resource_with_k8s_client(
+                self.res_updater.update_resource_with_k8s_client(
                     component=comp, pod_name=f'{comp}-{self.master_name[-1]}-0', cpu_value=cpu_limit[comp])
             utils.logging_or_print(f'{str(self)}: allocation calibration finished.',
                                    enable_logging=self.enable_logging, level=logging.INFO)
