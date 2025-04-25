@@ -3,8 +3,11 @@ import os
 import subprocess
 import multiprocessing
 from datetime import datetime
+import sys
 
 python_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, python_path)
+from core.utils import utils
 
 
 def clean_up(root_dir: str):  # Perform clean-up, root_dir: python_path
@@ -82,6 +85,57 @@ def stress_test(stress_test_dir: str, output_dir: str, duration: str, node_num: 
         print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR - stress_test() failed: {e}.')
 
 
+def mysql_test(output_dir: str, node_num: int):
+    # logging.info('Start mysql test')
+    print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Start mysql test.')
+    cmd_str = (f'sysbench /usr/share/sysbench/tests/include/oltp_legacy/oltp.lua --db-driver=mysql '
+               f'--mysql-host={utils.WORKER_NODE_IP} --mysql-port={utils.PORT_MYSQL} --mysql-user=root '
+               f'--mysql-password=123456 --mysql-db=testdb --oltp-table-size=200000 --oltp-tables-count=4 --threads=4 '
+               f'--events=10000 --time=300 --report-interval=3 run 2>&1 | '
+               f'tee {output_dir}/{node_num}node-mysql-test.txt')
+    try:
+        # logging.info(f'Command: {cmd_str}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Command: {cmd_str}.')
+        subprocess.run(cmd_str, shell=True, check=True, stdout=subprocess.PIPE, text=True)
+        # logging.info('End mysql test')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - End mysql test.')
+    except subprocess.CalledProcessError as e:
+        # logging.error(f'mysql_test() failed: {e}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR - mysql_test() failed: {e}.')
+
+
+def redis_test(output_dir: str, node_num: int):
+    # logging.info('Start redis test')
+    print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Start redis test.')
+    cmd_str = (f'redis-benchmark -t set,get -h {utils.WORKER_NODE_IP} -p {utils.PORT_REDIS} -c 100 -n 1000000 2>&1 '
+               f'| tee {output_dir}/{node_num}node-redis-test.txt')
+    try:
+        # logging.info(f'Command: {cmd_str}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Command: {cmd_str}.')
+        subprocess.run(cmd_str, shell=True, check=True, stdout=subprocess.PIPE, text=True)
+        # logging.info('End redis test')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - End redis test.')
+    except subprocess.CalledProcessError as e:
+        # logging.error(f'redis_test() failed: {e}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR - redis_test() failed: {e}.')
+
+
+def nginx_test(output_dir: str, duration: str, node_num: int):
+    # logging.info('Start nginx test')
+    print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Start nginx test.')
+    cmd_str = (f'wrk -t 12 -c 100 -d {duration} --latency http://{utils.WORKER_NODE_IP}:{utils.PORT_NGINX} 2>&1 '
+               f'| tee {output_dir}/{node_num}node-nginx-test.txt')
+    try:
+        # logging.info(f'Command: {cmd_str}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Command: {cmd_str}.')
+        subprocess.run(cmd_str, shell=True, check=True, stdout=subprocess.PIPE, text=True)
+        # logging.info('End nginx test')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - End nginx test.')
+    except subprocess.CalledProcessError as e:
+        # logging.error(f'nginx_test() failed: {e}')
+        print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - ERROR - nginx_test() failed: {e}.')
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Parallel tasks runner for clusterloader2 and stress testing.')
     parser.add_argument('--run_cl', action='store_true', help='Run clusterloader2 to simulate high-load situation')
@@ -113,8 +167,24 @@ if __name__ == "__main__":
                 'node_num': args.node,
                 'rps': rps,
                 'res_num': res_num})
+    mysql_test_process = multiprocessing.Process(
+        target=mysql_test,
+        kwargs={'output_dir': args.output,
+                'node_num': args.node})
+    redis_test_process = multiprocessing.Process(
+        target=redis_test,
+        kwargs={'output_dir': args.output,
+                'node_num': args.node})
+    nginx_test_process = multiprocessing.Process(
+        target=nginx_test,
+        kwargs={'output_dir': args.output,
+                'duration': "3m",
+                'node_num': args.node})
     if args.node > 0:
         process_list.append(stress_test_process)
+    process_list.append(mysql_test_process)
+    process_list.append(redis_test_process)
+    process_list.append(nginx_test_process)
     for process in process_list:
         process.start()
     for process in process_list:

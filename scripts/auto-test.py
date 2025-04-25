@@ -10,7 +10,7 @@ import signal
 
 from main import master_comp_placement, main
 
-python_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+python_path = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))  # repo dir
 sys.path.insert(0, python_path)
 from core.utils import utils
 
@@ -18,7 +18,7 @@ from core.utils import utils
 def run_stress_test(output_path: str, node_num: int, run_cl2: bool = False):
     # logging.info('Start stress test script')
     print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Start stress test script.')
-    cmd_str = (f'source <CONDA-ACTIVATE-BIN-PATH> <ENV-NAME> && python {python_path}/scripts/stress-test.py '
+    cmd_str = (f'source <conda path> <conda env> && python {python_path}/scripts/stress-test.py '
                f'--node {node_num} --output {output_path}')
     if run_cl2:
         cmd_str += ' --run_cl'
@@ -36,7 +36,7 @@ def run_stress_test(output_path: str, node_num: int, run_cl2: bool = False):
 def run_reset_cp(wider_fc: bool = False):
     # logging.info('Start reset control plane script')
     print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Start reset control plane script.')
-    cmd_str = (f'source <CONDA-ACTIVATE-BIN-PATH> <ENV-NAME> && '
+    cmd_str = (f'source <conda path> <conda env> && '
                f'python {python_path}/scripts/reset-control-plane.py')
     if wider_fc:
         cmd_str += ' --wider_fc'
@@ -62,14 +62,16 @@ if __name__ == '__main__':
                         help=f'Relative path to output directory '
                              f'(\'{python_path}/output/evaluation/<wrapper-dir>/<baseline>\')')
     parser.add_argument('--baseline', type=str, required=True, help='Baseline name')
+    parser.add_argument('--cpu_total', type=float, default=utils.NODE_ALLOCATABLE_CPU,
+                        help='total allocatable CPU for each master node')
     parser.add_argument('--scheduler_placement', type=str, default=utils.MASTERS[0].name,
                         choices=[node.name for node in utils.MASTERS],
                         help='master scheduler placement')
     parser.add_argument('--controller_manager_placement', type=str, default=utils.MASTERS[0].name,
                         choices=[node.name for node in utils.MASTERS],
                         help='master controller-manager placement')
-    parser.add_argument('--wider_fc', action='store_true',
-                        help='Enable wider fc for apiservers (3000, default: 600).')
+    parser.add_argument('--wider_tc', action='store_true',
+                        help='Enable wider tc for apiservers (3000, default: 600).')
     args = parser.parse_args()
     wrapper_dir = 'no-wrapper'
     if args.wrapper:
@@ -82,20 +84,21 @@ if __name__ == '__main__':
     print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - INFO - Auto-test script started. (node_num_list: '
           f'{node_num_list}, run_cl2: {args.run_cl2}, baseline: {args.baseline}, scheduler_placement: '
           f'{args.scheduler_placement}, controller_manager_placement: {args.controller_manager_placement})')
-    running_main = args.baseline in ['weighted', 'p99', 'tsp', 'evo-alg', 'merkury']
+    running_main = args.baseline in ['weighted', 'p99', 'tsp', 'merkury', 'ga', 'disable_fc', 'mmck', 'reactive']
     # main params
     main_params = {'baseline': args.baseline,
                    'pred_model': 'latest',
                    'cpu_weight': 'cpu_load',
+                   'cpu_total': args.cpu_total,
                    'mem_weight': 'req_num',
                    'interval': 5,
                    'dry_run': False,
                    'cpu_update_range': 0.2,
                    'mem_update_range': 0.2,
-                   'load_threshold': 0.7 if args.baseline in ['weighted', 'evo-alg', 'merkury'] else 0.0,
+                   'load_threshold': 0.7 if args.baseline in ['weighted', 'merkury', 'ga', 'disable_fc', 'mmck'] else 0.0,
                    'disable_mem_alloc': True,
-                   'calibration': args.baseline in ['merkury'],
-                   'wider_fc': args.wider_fc}
+                   'calibration': args.baseline in ['merkury', 'ga', 'disable_fc', 'mmck'],
+                   'wider_tc': args.wider_tc}
     current_log_handler = None
     if args.wo_cl2:
         # without cl2
@@ -179,7 +182,7 @@ if __name__ == '__main__':
                             if not next_line.endswith('Step "[step: 05] Collecting saturation pod measurements" started'):
                                 # logging.warning(f'Clusterloader2 test for # node {node_num} failed: {next_line}')
                                 print(f'{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} - WARNING - Clusterloader2 test for '
-                                      f'# node {node_num} failed: {next_line}')
+                                    f'# node {node_num} failed: {next_line}')
                                 cl2_test_pass = False
                                 break
                 if not cl2_test_pass:

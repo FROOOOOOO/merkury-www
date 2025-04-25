@@ -23,31 +23,32 @@ def run_recommender(rec: recommender.Recommender, shutdown_event):
     rec.shutdown()
 
 
-def main(baseline, pred_model, cpu_weight, mem_weight, interval, dry_run, cpu_update_range, mem_update_range,
-         disable_mem_alloc, calibration, load_threshold, wider_fc):
+def main(baseline, cpu_total, pred_model, cpu_weight, mem_weight, interval, dry_run, cpu_update_range, mem_update_range,
+         disable_mem_alloc, calibration, load_threshold, wider_tc):
     stop_event = multiprocessing.Event()
+    co_located_components = [utils.KUBE_APISERVER, utils.KUBE_CONTROLLER_MANAGER, utils.KUBE_SCHEDULER]
     updater_tc = tc_updater.TcUpdater(enable_logging=False)
-    updater_res = res_updater.ResourceUpdater(collocated_components=utils.CO_LOCATED_COMPONENTS, enable_logging=False)
+    updater_res = res_updater.ResourceUpdater(collocated_components=co_located_components, enable_logging=False)
     if not dry_run:
-        # reset resource and fc
-        updater_tc.reset_fc(wider_apiserver_fcp=wider_fc)
+        # reset resource and tc
+        updater_tc.reset_tc(wider_apiserver_tcp=wider_tc)
         updater_res.reset_resource_limit_of_all_components()
-    # merkury
+    # recommender
     test_recommender_0 = recommender.Recommender(
-        master_name=utils.MASTERS[0].name, master_addr=utils.MASTERS[0].ip,
-        co_located_components=utils.CO_LOCATED_COMPONENTS, is_master=True, baseline=baseline, pred_model=pred_model,
+        master_name=utils.MASTERS[0].name, master_addr=utils.MASTERS[0].ip, cpu_total=cpu_total,
+        co_located_components=co_located_components, is_master=True, baseline=baseline, pred_model=pred_model,
         dry_run=dry_run, cpu_weight=cpu_weight, mem_weight=mem_weight, cpu_update_range=cpu_update_range,
         mem_update_range=mem_update_range, disable_mem_alloc=disable_mem_alloc, alloc_calibration=calibration,
         load_threshold=load_threshold)
     test_recommender_1 = recommender.Recommender(
-        master_name=utils.MASTERS[1].name, master_addr=utils.MASTERS[1].ip,
-        co_located_components=utils.CO_LOCATED_COMPONENTS, is_master=False, baseline=baseline, pred_model=pred_model,
+        master_name=utils.MASTERS[1].name, master_addr=utils.MASTERS[1].ip, cpu_total=cpu_total,
+        co_located_components=co_located_components, is_master=False, baseline=baseline, pred_model=pred_model,
         dry_run=dry_run, cpu_weight=cpu_weight, mem_weight=mem_weight, cpu_update_range=cpu_update_range,
         mem_update_range=mem_update_range, disable_mem_alloc=disable_mem_alloc, alloc_calibration=calibration,
         load_threshold=load_threshold)
     test_recommender_2 = recommender.Recommender(
-        master_name=utils.MASTERS[2].name, master_addr=utils.MASTERS[2].ip,
-        co_located_components=utils.CO_LOCATED_COMPONENTS, is_master=False, baseline=baseline, pred_model=pred_model,
+        master_name=utils.MASTERS[2].name, master_addr=utils.MASTERS[2].ip, cpu_total=cpu_total,
+        co_located_components=co_located_components, is_master=False, baseline=baseline, pred_model=pred_model,
         dry_run=dry_run, cpu_weight=cpu_weight, mem_weight=mem_weight, cpu_update_range=cpu_update_range,
         mem_update_range=mem_update_range, disable_mem_alloc=disable_mem_alloc, alloc_calibration=calibration,
         load_threshold=load_threshold)
@@ -87,8 +88,8 @@ def main(baseline, pred_model, cpu_weight, mem_weight, interval, dry_run, cpu_up
             cost_monitor_process.join()
         pod_monitor_thread.join()
         if not dry_run:
-            # reset resource and fc after experiment completion
-            updater_tc.reset_fc(wider_apiserver_fcp=wider_fc)
+            # reset resource and tc after experiment completion
+            updater_tc.reset_tc(wider_apiserver_tcp=wider_tc)
             updater_res.reset_resource_limit_of_all_components()
             updater_res.reset_resource_limit_of_all_components(restart=True)
 
@@ -130,14 +131,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Main function to run metric fetchers, recommenders, and updaters.')
     parser.add_argument('--log_level', '-l', type=int, choices=[0, 1, 2, 3, 4], default=3,
                         help='Logging level:\n\t0--CRITICAL\n\t1--ERROR\n\t2--WARNING\n\t3--INFO(default)\n\t4--DEBUG')
-    parser.add_argument('--file_name', '-f', type=str, default='ours',
-                        help='log file name (default: ours), logs are stored in '
-                             '../logs/<FILE_NAME>.log')
+    parser.add_argument('--file_name', '-f', type=str, default='merkury',
+                        help='log file name (default: merkury), logs are stored in '
+                             '/mnt/data/nfs/ljy/code/MerKury/logs/<FILE_NAME>.log')
+    parser.add_argument('--cpu_total', type=float, default=utils.NODE_ALLOCATABLE_CPU,
+                        help='total allocatable CPU for each master node')
     parser.add_argument('--baseline', '-b', type=str, default='merkury',
-                        choices=['merkury', 'p99', 'tsp', 'evo-alg', 'weighted'],
+                        choices=['merkury', 'p99', 'tsp', 'weighted', 'ga', 'disable_tc', 'mmck', 'reactive'],
                         help=('Resource allocation baseline: \'merkury\'--MerKury(default), \'p99\'--99 percentile, '
-                              '\'tsp\'--time series prediction, \'evo-alg\'--simple evolution algorithm, '
-                              '\'weighted\'--allocate according to weight'))
+                              '\'tsp\'--time series prediction, \'weighted\'--allocate according to weight, '
+                              '\'ga\'--brute force ga optimizer, \'disable_tc\'--MerKury without tc optimization, '
+                              '\'mmck\'--MerKury with M/M/c/K queue model, \'reactive\'--reactive strategy'))
     parser.add_argument('--pred_model', '-p', type=str, default='latest',
                         choices=['latest', 'average', 'power_decay', 'exponential_decay', 'ARIMA', 'VARMA'],
                         help=('time series prediction model to apply (applicable for baselines except \'p99\'): '
@@ -173,8 +177,8 @@ if __name__ == '__main__':
     parser.add_argument('--load_threshold', type=float, default=0.0, help='load threshold (>=0), default: 0.0')
     parser.add_argument('--disable_mem_alloc', action='store_true', help='disable memory allocation during execution')
     parser.add_argument('--calibration', action='store_true', help='enable allocation calibration')
-    parser.add_argument('--wider_fc', action='store_true',
-                        help='Enable wider fc for apiservers (3000, default: 600).')
+    parser.add_argument('--wider_tc', action='store_true',
+                        help='Enable wider tc for apiservers (3000, default: 600).')
     parser.add_argument('--enable_placement', action='store_true', help='Enable placement')
     parser.add_argument('--scheduler_placement', type=str, default=utils.MASTERS[0].name,
                         choices=[node.name for node in utils.MASTERS],
@@ -202,5 +206,5 @@ if __name__ == '__main__':
     # time.sleep(30)  # waiting for placement settled
     main(baseline=args.baseline, pred_model=args.pred_model, cpu_weight=args.cpu_weight, mem_weight=args.mem_weight,
          interval=args.interval, dry_run=args.dry_run, cpu_update_range=args.cpu_update_range,
-         load_threshold=args.load_threshold, mem_update_range=args.mem_update_range,
-         disable_mem_alloc=args.disable_mem_alloc, calibration=args.calibration, wider_fc=args.wider_fc)
+         load_threshold=args.load_threshold, mem_update_range=args.mem_update_range, cpu_total=args.cpu_total,
+         disable_mem_alloc=args.disable_mem_alloc, calibration=args.calibration, wider_tc=args.wider_tc)
