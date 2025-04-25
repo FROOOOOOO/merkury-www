@@ -1,7 +1,7 @@
-# MerKury - WWW
-Code repo for "Mer**K**ury: Adaptive Resource Allocation to Enhance the **K**ubernetes Performance for Large-Scale Clusters" submitted to WWW '25
+# MerKury - WWW '25
+Code repo for "Mer**K**ury: Adaptive Resource Allocation to Enhance the **K**ubernetes Performance for Large-Scale Clusters" accepted by WWW '25
 
-<img src="images/system-arch.png" alt="system architecture" style="zoom: 67%;" />
+<img src="images/merkury-arch-single-column.svg" alt="system architecture"/>
 
 ## Directory structure
 
@@ -10,7 +10,7 @@ Code repo for "Mer**K**ury: Adaptive Resource Allocation to Enhance the **K**ube
   YAML configuration files.
 
   - kwok: KWOK node example
-  - monitor: `endpoints`, `services`, `serviceAccounts`, and `clusterRoleBindings` related to monitoring system
+  - monitor: `endpoints`, `services`, `serviceAccounts`, and `clusterRoleBindings` related to the monitoring system
   - prom: Prometheus configurations and related resources (`serviceMonitors` and rules)
   - test-control-plane: control plane components managed by `statefulSet`
     - native: arguments set for "k8s-native" baseline
@@ -56,9 +56,9 @@ Code repo for "Mer**K**ury: Adaptive Resource Allocation to Enhance the **K**ube
 
 - experiment setup
 
-  <img src="images/experiment-setup.png" alt="experiment setup" style="zoom: 67%;" />
+  <img src="images/experiment-setup.svg" alt="experiment setup"/>
 
 - HW/SW configuration
 
-  <img src="images/node-config.png" alt="node configuration" style="zoom:67%;" />
+  <img src="images/node-config.png" alt="node configuration"/>
 
