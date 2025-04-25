@@ -7,7 +7,7 @@ import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
 from core.utils import utils
 import core.utils.queue_model as uqm
-from core.load_fetcher import simple_fetcher, load_fetcher
+from core.load_fetcher import p99_fetcher, merkury_fetcher
 from core.recommender import ga_optimizer, predictor, simple_ga
 from core.queue_model import queue_model
 from core.updater import res_updater, tc_updater

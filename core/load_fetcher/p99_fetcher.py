@@ -2,11 +2,11 @@ import logging
 import time
 import numpy as np
 from apscheduler.schedulers.background import BackgroundScheduler
-from core.load_fetcher import base
+from core.load_fetcher import load_fetcher
 from core.utils import prom_query, utils
 
 
-class SimpleFetcher(base.MetricFetcher):
+class P99Fetcher(load_fetcher.LoadFetcher):
     """
     P99 fetcher (bound to one pod/instance) for periodically fetching CPU and memory metrics
     """
@@ -33,7 +33,7 @@ class SimpleFetcher(base.MetricFetcher):
         # self._update_job = self._scheduler.add_job(self.p99_update, trigger='interval', seconds=self._query_interval)
 
     def __str__(self) -> str:
-        return (f'Simple fetcher (node {self.node_name} ({self.node_addr}), container: {self.container}, '
+        return (f'P99 fetcher (node {self.node_name} ({self.node_addr}), container: {self.container}, '
                 f'kubelet port: {self.kubelet_port})')
 
     # get methods
