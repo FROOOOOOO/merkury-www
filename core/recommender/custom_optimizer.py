@@ -14,7 +14,7 @@ class Optimizer:
     """
     def __init__(self, cpu_total: int | float, component_stats: dict, scheduler: utils.AsyncCompStats, weights: dict,
                  cpu_granularity: int = utils.DEFAULT_CPU_GRANULARITY, cpu_request: dict = utils.DEFAULT_CPU_REQ,
-                 brute_force: bool = False, disable_fc: bool = False, default_concurrency: int | None = None,
+                 brute_force: bool = False, disable_tc: bool = False, default_concurrency: int | None = None,
                  default_queue_length: int = utils.DEFAULT_QUEUE_LENGTH, pop_size: int = utils.GA_POP_SIZE,
                  max_gen: int = utils.GA_MAX_GEN, select_rate: float = utils.GA_SELECT_RATE,
                  cross_rate: float = utils.GA_CROSS_RATE, mutate_rate: float = utils.GA_MUTATE_RATE,
@@ -45,9 +45,9 @@ class Optimizer:
         # options
         self.debugging = debugging  # for test only
         self.brute_force = brute_force
-        self.disable_fc = disable_fc
-        if disable_fc and default_concurrency is None:
-            raise ValueError('missing default_concurrency when disable_fc')
+        self.disable_tc = disable_tc
+        if disable_tc and default_concurrency is None:
+            raise ValueError('missing default_concurrency when disable_tc')
         self.default_concurrency = default_concurrency
         self.default_queue_length = default_queue_length
         # cpu granularity and cpu total
@@ -124,7 +124,7 @@ class Optimizer:
                     cpu_lb += 1
                 self.cpu_lb[comp] = cpu_lb
                 if self.brute_force:
-                    self.f_rec[comp] = self.queue_models[comp].get_available_fc()
+                    self.f_rec[comp] = self.queue_models[comp].get_available_tc()
                 else:
                     self.f_rec[comp] = self.queue_models[comp].get_flow_ctrl_rec()
             self.cpu_left = self.cpu_total - sum(self.cpu_lb.values())
@@ -271,7 +271,7 @@ class Optimizer:
         cpu = self.init_c()
         if len(cpu) == 0:
             return []
-        if self.disable_fc:
+        if self.disable_tc:
             sample = [[self.default_concurrency, cpu[i], self.default_queue_length] for i in range(self.comp_num)]
         else:
             if self.scheduler.is_empty():
@@ -291,7 +291,7 @@ class Optimizer:
                         if not init_success:
                             return []
                 if self.brute_force:
-                    f = [random.choice(self._qm_dict[comp][scheduler_cpu].get_available_fc())
+                    f = [random.choice(self._qm_dict[comp][scheduler_cpu].get_available_tc())
                          for comp in self.component_stats]
                 else:
                     f = [self._qm_dict[comp][scheduler_cpu].get_flow_ctrl_rec(cpu_alloc=cpu[i] / self.cpu_granularity)
@@ -363,7 +363,7 @@ class Optimizer:
                 best_fitness = self.fitness_function(sample)
                 return {comp: [0, self.cpu_total / self.cpu_granularity, 0]}, best_fitness, [best_fitness]
             elif not self.brute_force:
-                if self.disable_fc:
+                if self.disable_tc:
                     sample = [[self.default_concurrency, self.cpu_total, self.default_queue_length]]
                 else:
                     sample = [[self.f_rec[comp], self.cpu_total,
@@ -405,7 +405,7 @@ class Optimizer:
                         index_to_cal = random.choice([i for i in range(self.comp_num)])
                         excessive_cpu[index_to_cal] += 1
                         diff += 1
-                if self.disable_fc:
+                if self.disable_tc:
                     calibrated_sample = [
                         [self.default_concurrency, excessive_cpu[i] + self.cpu_lb[self.sample_to_comp[i]],
                          self.default_queue_length] for i in range(self.comp_num)]
@@ -450,12 +450,12 @@ class Optimizer:
                     cpu_left -= 1
                 cpu = [cpu_alloc[i] + cpu_lb[i] for i in range(len(self.component_stats))]
                 cpu.append(scheduler_cpu)
-                if self.disable_fc:
+                if self.disable_tc:
                     calibrated_sample = [[self.default_concurrency, cpu[i], self.default_queue_length]
                                          for i in range(self.comp_num)]
                 else:
                     if self.brute_force:
-                        f = [random.choice(self._qm_dict[comp][scheduler_cpu].get_available_fc())
+                        f = [random.choice(self._qm_dict[comp][scheduler_cpu].get_available_tc())
                              for comp in self.component_stats]
                     else:
                         f = [self._qm_dict[comp][scheduler_cpu].get_flow_ctrl_rec(

@@ -14,7 +14,7 @@ class GAOptimizer:
     """
     def __init__(self, cpu_total: int | float, queue_models: dict, weights: dict,
                  cpu_granularity: int = utils.DEFAULT_CPU_GRANULARITY, cpu_request: dict = utils.DEFAULT_CPU_REQ,
-                 brute_force: bool = False, disable_fc: bool = False, default_concurrency: int | None = None,
+                 brute_force: bool = False, disable_tc: bool = False, default_concurrency: int | None = None,
                  default_queue_length: int = utils.DEFAULT_QUEUE_LENGTH, pop_size: int = utils.GA_POP_SIZE,
                  max_gen: int = utils.GA_MAX_GEN, select_rate: float = utils.GA_SELECT_RATE,
                  cross_rate: float = utils.GA_CROSS_RATE, mutate_rate: float = utils.GA_MUTATE_RATE,
@@ -30,7 +30,7 @@ class GAOptimizer:
         self.cpu_total = math.floor(cpu_total * self.cpu_granularity)
         self.debugging = debugging  # for test only
         self.brute_force = brute_force
-        self.disable_fc = disable_fc
+        self.disable_tc = disable_tc
         # queue models
         self.queue_models = {}
         self.cpu_lb = {}
@@ -56,19 +56,19 @@ class GAOptimizer:
                     cpu_lb += 1  # ensure cpu_lb is approachable
                 self.cpu_lb[comp] = cpu_lb
                 if self.brute_force:
-                    fc_limits = self.queue_models[comp].get_fc_limits()
-                    fc_limits_full = [0]
-                    fc_limits_full.extend(fc_limits)
-                    fc_limits_full.append(self.queue_models[comp].get_fc_upper_bound() + 1)
-                    available_fc = []
-                    for i in range(1, len(fc_limits_full), 2):
-                        left = math.ceil(fc_limits_full[i])
-                        if left == fc_limits_full[i]:
+                    tc_limits = self.queue_models[comp].get_tc_limits()
+                    tc_limits_full = [0]
+                    tc_limits_full.extend(tc_limits)
+                    tc_limits_full.append(self.queue_models[comp].get_tc_upper_bound() + 1)
+                    available_tc = []
+                    for i in range(1, len(tc_limits_full), 2):
+                        left = math.ceil(tc_limits_full[i])
+                        if left == tc_limits_full[i]:
                             left += 1
-                        right = math.ceil(fc_limits_full[i + 1])
+                        right = math.ceil(tc_limits_full[i + 1])
                         num = list(range(left, right))
-                        available_fc.extend(num)
-                    self.f_rec[comp] = self.queue_models[comp].get_available_fc()
+                        available_tc.extend(num)
+                    self.f_rec[comp] = self.queue_models[comp].get_available_tc()
                 else:
                     self.f_rec[comp] = self.queue_models[comp].get_flow_ctrl_rec()
         self.comp_num = len(self.queue_models)
@@ -91,8 +91,8 @@ class GAOptimizer:
                 self.weights[comp] = weights[comp]
         self.default_concurrency = default_concurrency
         self.default_queue_length = default_queue_length
-        if disable_fc and default_concurrency is None:
-            raise ValueError('missing default_concurrency when disable_fc')
+        if disable_tc and default_concurrency is None:
+            raise ValueError('missing default_concurrency when disable_tc')
         # hyper params of GA
         if not isinstance(pop_size, int) or pop_size <= 0:
             raise ValueError(f'pop_size must be positive integer, received {pop_size} ({type(pop_size)}) instead')
@@ -142,7 +142,7 @@ class GAOptimizer:
         cpu = self.init_c()
         if len(cpu) == 0:
             return []
-        if self.disable_fc:
+        if self.disable_tc:
             sample = [[self.default_concurrency, cpu[i], self.default_queue_length] for i in range(self.comp_num)]
         elif self.brute_force:
             f = self.init_f()
@@ -211,7 +211,7 @@ class GAOptimizer:
                     index_to_cal = random.choice([i for i in range(self.comp_num)])
                     excessive_cpu[index_to_cal] += 1
                     diff += 1
-            if self.disable_fc:
+            if self.disable_tc:
                 calibrated_sample = [[self.default_concurrency, excessive_cpu[i] + self.cpu_lb[self.sample_to_comp[i]],
                                       self.default_queue_length] for i in range(self.comp_num)]
             elif self.brute_force:

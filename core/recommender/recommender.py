@@ -69,9 +69,9 @@ class Recommender:
         self.mem_total = mem_total  # total memory of the node (unit: 10^6B)
         self.mem_request = mem_request
         self.buffer_size = buffer_size
-        if baseline in ['p99', 'tsp', 'weighted', 'merkury-new', 'merkury', 'ga', 'disable_fc', 'mmck', 'reactive']:
-            # ga -- simply utilize GA optimizer to allocate resource and fc param
-            # disable fc -- merkury w/o fc param update
+        if baseline in ['p99', 'tsp', 'weighted', 'merkury-new', 'merkury', 'ga', 'disable_tc', 'mmck', 'reactive']:
+            # ga -- simply utilize GA optimizer to allocate resource and tc param
+            # disable tc -- merkury w/o tc param update
             # mmck -- replace queuing model with basic M/M/c/K
             self.baseline = baseline
         else:
@@ -88,7 +88,7 @@ class Recommender:
             self.mem_weight = mem_weight  # for 'weighted' baseline
         else:
             self.mem_weight = 'req_num'
-        self.is_master = is_master  # only master recommender can edit fc param
+        self.is_master = is_master  # only master recommender can edit tc param
         self._recommendation_buffer = []  # record latest n RecommendationForNodes (n=buffer_size)
         self._metrics_buffer = []  # record latest n KubeRequestsSummary (n=buffer_size)
         self.alloc_calibration = alloc_calibration  # whether enable allocation calibration
@@ -122,7 +122,7 @@ class Recommender:
         # allocation weights, allocation_weights[code][comp] = w, if there are n co-located components, according to
         # whether each component is busy, code is an n-bit binary
         self.allocation_weights = utils.nested_dict()
-        if self.baseline in ['merkury', 'ga', 'disable_fc']:
+        if self.baseline in ['merkury', 'ga', 'disable_tc']:
             code_length = len(self.co_located_components)
             for i in range(int(2 ** code_length)):
                 binary_code = bin(i)[2:].zfill(code_length)
@@ -166,7 +166,7 @@ class Recommender:
             pred, _ = predictor.Predictor(
                 data=data, start_timestamps=timestamps, time_windows=tws, model=self.pred_model).predict()
             return pred
-        if self.baseline in ['weighted', 'merkury', 'ga', 'disable_fc']:
+        if self.baseline in ['weighted', 'merkury', 'ga', 'disable_tc']:
             data = {}
             for comp in utils.CONTROL_PLANE_COMPONENTS:
                 data[f'{comp}_req_num'] = [krs.get_req_num(comp) for krs in self._metrics_buffer]
@@ -764,7 +764,7 @@ class Recommender:
         self._generate_final_recommendation(
             ts=start, cpu_alloc=cpu_alloc, mem_alloc=mem_alloc, concurrency_rec=concurrency_rec, ql_rec=ql_rec)
 
-    def _recommend_disable_fc(self):
+    def _recommend_disable_tc(self):
         start = time.time()
         cpu_alloc, mem_alloc = {}, {}
         for comp in self.co_located_components:
@@ -824,7 +824,7 @@ class Recommender:
                                               (cpu_left - sum([cpu_lb[comp] for comp in busy_components]))))
             ga = ga_optimizer.GAOptimizer(
                 cpu_total=cpu_left, queue_models=qm, weights=self.allocation_weights,
-                cpu_granularity=adaptive_granularity, disable_fc=True, default_concurrency=default_concurrency)
+                cpu_granularity=adaptive_granularity, disable_tc=True, default_concurrency=default_concurrency)
             f_c_q_alloc, _, _ = ga.run()
             if f_c_q_alloc is None:
                 utils.logging_or_print(
@@ -859,7 +859,7 @@ class Recommender:
                                                   (cpu_left - sum([cpu_lb[comp] for comp in qm_ss.keys()]))))
                 ga = ga_optimizer.GAOptimizer(
                     cpu_total=cpu_left, queue_models=qm_ss, weights=self.allocation_weights,
-                    cpu_granularity=adaptive_granularity, disable_fc=True, default_concurrency=default_concurrency)
+                    cpu_granularity=adaptive_granularity, disable_tc=True, default_concurrency=default_concurrency)
                 f_c_q_alloc, _, _ = ga.run()
                 if f_c_q_alloc is None:
                     utils.logging_or_print(
@@ -935,12 +935,12 @@ class Recommender:
 
     # ---END DEPRECATED---
 
-    def _recommend_merkury_new(self, brute_force: bool = False, disable_fc: bool = False, strategy_gus: str = 'balance',
+    def _recommend_merkury_new(self, brute_force: bool = False, disable_tc: bool = False, strategy_gus: str = 'balance',
                                strategy_lus: str = 'optimistic') -> (bool, utils.KubeRequestsSummary):
         """
         MerKury recommendation algorithm
         :param brute_force: whether using brute-force algorithm in optimizer
-        :param disable_fc: whether disable flow control params recommendation
+        :param disable_tc: whether disable traffic control params recommendation
         :param strategy_gus: allocation strategy for global unsteady state
         :param strategy_lus: allocation strategy for local unsteady state
         :return: whether recommended and updated, upcoming kube request (for allocation calibration)
@@ -985,7 +985,7 @@ class Recommender:
                     m_rec[comp] = m_0 * utils.AMPLIFIER
                 mem_left -= m_rec[comp]
         # 3. busy components resource allocation
-        # get concurrency from Prometheus (if disable_fc)
+        # get concurrency from Prometheus (if disable_tc)
         default_concurrency = 600
         max_concurrency = (self.fetchers[utils.KUBE_APISERVER].
                            query_max_concurrency(timestamp=int(rec_start)))
@@ -1055,7 +1055,7 @@ class Recommender:
 
         def get_f_and_q_for_apiserver(cpu_apiserver: float, cpu_scheduler: float) -> (int, int):
             f_recommendation, q_recommendation = 0, 0
-            if not disable_fc:
+            if not disable_tc:
                 comp = utils.KUBE_APISERVER
                 apiserver_stats = comp_stats[comp]
                 concurrency = apiserver_stats.get_concurrency()
@@ -1143,7 +1143,7 @@ class Recommender:
                                  if comp not in [utils.KUBE_SCHEDULER,
                                                  utils.KUBE_CONTROLLER_MANAGER]},
                 scheduler=comp_stats[utils.KUBE_SCHEDULER] if utils.KUBE_SCHEDULER in steady_components else utils.AsyncCompStats(empty=True),
-                weights=self.allocation_weights[bc_code], brute_force=brute_force, disable_fc=disable_fc,
+                weights=self.allocation_weights[bc_code], brute_force=brute_force, disable_tc=disable_tc,
                 default_concurrency=default_concurrency)
             f_c_q_alloc, _, _ = opt.run()
             if f_c_q_alloc is None:  # degenerate to 'weighted CPU load'
@@ -1396,7 +1396,7 @@ class Recommender:
             utils.logging_or_print(
                 f'{str(self)} has received a fetcher summary (end timestamp: {metrics["ts"]}).',
                 enable_logging=self.enable_logging, level=logging.INFO)
-        if self.baseline in ['weighted', 'merkury', 'ga', 'disable_fc']:  # merkury fetcher
+        if self.baseline in ['weighted', 'merkury', 'ga', 'disable_tc']:  # merkury fetcher
             kube_requests = {}
             for comp in self.co_located_components:
                 kube_requests[comp] = self.fetchers[comp].get_load()
@@ -1437,7 +1437,7 @@ class Recommender:
             self.fetchers[comp].load_update()
         # 2. get latest load
         self._load_query()
-        # 3. resource and fc allocation
+        # 3. resource and tc allocation
         allocated = False
         upcoming_kube_requests = None
         if self.baseline in ['merkury', 'mmck']:
@@ -1446,9 +1446,9 @@ class Recommender:
         elif self.baseline == 'ga':
             # self._recommend_ga()
             allocated, upcoming_kube_requests = self._recommend_merkury_new(brute_force=True)
-        elif self.baseline == 'disable_fc':
-            # self._recommend_disable_fc()
-            allocated, upcoming_kube_requests = self._recommend_merkury_new(disable_fc=True)
+        elif self.baseline == 'disable_tc':
+            # self._recommend_disable_tc()
+            allocated, upcoming_kube_requests = self._recommend_merkury_new(disable_tc=True)
         elif self.baseline == 'p99':
             self._recommend_p99()
         elif self.baseline == 'tsp':
@@ -1459,7 +1459,7 @@ class Recommender:
             self._recommend_reactive()
         else:
             return
-        if self.baseline in ['merkury', 'ga', 'disable_fc', 'mmck'] and self.alloc_calibration and allocated:
+        if self.baseline in ['merkury', 'ga', 'disable_tc', 'mmck'] and self.alloc_calibration and allocated:
             time.sleep(self.recommend_interval / 2)
             self._allocation_calibrate(upcoming_kube_requests)
 
@@ -1640,7 +1640,7 @@ class Recommender:
                     ignore_update_range=self.last_state_recommended is False)
             if (concurrency_rec is not None and ql_rec is not None and self.is_master and
                     utils.KUBE_APISERVER in self.co_located_components):
-                # update FC params
+                # update tc params
                 self.tc_updater.update_tc_with_k8s_client(
                     concurrency=concurrency_rec[utils.KUBE_APISERVER], queue_length=ql_rec[utils.KUBE_APISERVER])
             update_end = time.time()
