@@ -8,10 +8,10 @@ import logging
 from core.utils import utils, queue_model
 
 
-class QueueModelwithTruncation:  # similar to M/M/c/K
+class QueueModelCustom:  # M/M/c/K with dynamic and non-linear mapping
     def __init__(self, concurrency: np.ndarray, cpu_utl: np.ndarray,
                  total_load: decimal.Decimal | float | int, delta_t: int, req_num: int,
-                 precision: int = 200, interp_method: str = 'linear', enable_tqdm: bool = False):
+                 interp_method: str = 'linear', enable_tqdm: bool = False):
         if concurrency.ndim != 1:
             raise ValueError(f'concurrency must be 1d np.ndarray, received {concurrency.ndim}d instead')
         if concurrency.shape != cpu_utl.shape:
@@ -26,7 +26,6 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
         self._req_num = req_num
         self._lambda = decimal.Decimal(self._req_num / self._delta_t)
         self._mu = decimal.Decimal(self._req_num / self._total_load)
-        self.precision = precision
         self.enable_tqdm = enable_tqdm
         self.interp_method = interp_method
 
@@ -34,10 +33,10 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
             fitting_func = queue_model.interpolate_fitting(self._concurrency, self._cpu_utl, kind=interp_method)
             x = np.array(x)
             mapping_values = np.zeros_like(x, dtype=float)
-            # 对于数组中所有超过最大阈值的元素，应用fitting_func(max(self._concurrency))
+            # for elements > max, apply fitting_func(max(self._concurrency))
             indices_over_max = x > max(self._concurrency)
             mapping_values[indices_over_max] = fitting_func(max(self._concurrency))
-            # 对于数组中所有其他元素，应用fitting_func(element)
+            # for other elements, apply fitting_func(element)
             indices_below_max = ~indices_over_max
             mapping_values[indices_below_max] = fitting_func(x[indices_below_max])
             return mapping_values
@@ -66,8 +65,8 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
             fc_limits = []
             for i in range(len(self._concurrency)):
                 if i != len(self._concurrency) - 1:
-                    x_1, y_1 = self._concurrency[i], self._cpu_utl[i]
-                    x_2, y_2 = self._concurrency[i + 1], self._cpu_utl[i + 1]
+                    x_1, y_1 = self._concurrency[i], int(self._cpu_utl[i])
+                    x_2, y_2 = self._concurrency[i + 1], int(self._cpu_utl[i + 1])
                     if self._cpu_lower_bound < min(y_1, y_2) or self._cpu_lower_bound > max(y_1, y_2) or y_1 == y_2:
                         continue
                     else:
@@ -77,7 +76,7 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
             if not fc_limits:
                 self._fc_limits = [0]
             else:
-                self._fc_limits = [fc_limit for fc_limit in fc_limits if bounds[0][0] <= fc_limit <= bounds[0][1]]
+                self._fc_limits = [float(fc_limit) for fc_limit in fc_limits if bounds[0][0] <= fc_limit <= bounds[0][1]]
                 # self._fc_limits.sort()
         else:
             # TODO: how to avoid errors like "ValueError: A value in x_new is below the interpolation
@@ -98,13 +97,13 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                     self._fc_limits.sort()
 
     def __str__(self):
-        return (f'Params:\n'
+        return (f'M/M/c/K model with dynamic mapping\n'
+                f'Params:\n'
                 f'  Concurrency list = {self._concurrency}\n'
                 f'  CPU utilization = {self._cpu_utl}\n'
                 f'  Delta t = {self._delta_t}ms\n'
                 f'  Number of requests = {self._req_num}\n'
                 f'  Total load = {self._total_load:.3f}ms·core\n'
-                f'  Precision = {self.precision}\n'
                 f'  Interpolation method = {self.interp_method}\n'
                 f'Bounds:\n'
                 f'  CPU lower bound = {self._cpu_lower_bound}\n'
@@ -165,47 +164,6 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
             available_fc.extend(num)
         return available_fc
 
-    def _get_next_cpu_alloc(self, cpu_alloc: decimal.Decimal | int) -> decimal.Decimal | int:
-        if cpu_alloc - self._cpu_lower_bound < 0.5:
-            return cpu_alloc + decimal.Decimal(0.1)
-        elif cpu_alloc - self._cpu_lower_bound < 3:
-            return cpu_alloc + decimal.Decimal(0.5)
-        else:
-            return math.ceil(cpu_alloc) + 1
-
-    def _get_next_flow_ctrl(self, flow_ctrl: int) -> int:
-        if flow_ctrl <= self._fc_limits[0]:
-            if math.ceil(self._fc_limits[0]) == math.floor(self._fc_limits[0]):
-                return int(self._fc_limits[0] + 1)
-            else:
-                return math.ceil(self._fc_limits[0])
-        small_step_intervals = []
-        for i, limit in enumerate(self._fc_limits):
-            if i % 2 == 0:
-                if math.ceil(limit) == math.floor(limit):
-                    small_step_intervals.append((int(limit + 1), int(limit + 5)))
-                else:
-                    small_step_intervals.append((math.ceil(limit), math.ceil(limit) + 4))
-            else:
-                if math.ceil(limit) == math.floor(limit):
-                    small_step_intervals.append((int(limit - 5), int(limit + -1)))
-                else:
-                    small_step_intervals.append((math.floor(limit) - 4, math.floor(limit)))
-        small_step = False
-        next_interval_index = -1
-        for i, interval in enumerate(small_step_intervals):
-            if interval[0] <= flow_ctrl < interval[1]:
-                small_step = True
-                break
-            if interval[0] > flow_ctrl:
-                next_interval_index = i
-        if small_step or flow_ctrl < self._fc_limits[0]:
-            return flow_ctrl + 1
-        else:
-            if next_interval_index != -1:
-                return min(flow_ctrl + 10, small_step_intervals[next_interval_index][0])
-            return flow_ctrl + 10
-
     def _a_n(self, n: int, flow_ctrl: int, cpu_alloc: decimal.Decimal | float | int, temp_n: int = 0,
              temp_res: decimal.Decimal | int = 0) -> decimal.Decimal | int:
         if n <= 0:
@@ -234,6 +192,7 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
             sum = temp_res
         else:
             sum = 0
+        n = int(n)
         t_n = 0
         t_res = 0
         if self.enable_tqdm:
@@ -265,6 +224,7 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
              temp_n: int = 0, temp_res: decimal.Decimal | int = 0) -> decimal.Decimal | int:
         if n < 0:  # invalid n
             return -1
+        n = int(n)
         p = self.calc_p_0(flow_ctrl, cpu_alloc, max_ql)
         if temp_n > 0:
             p = temp_res
@@ -293,6 +253,7 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                    max_ql: int = 1000, temp_n: int = 0, temp_res: decimal.Decimal | int = 0) -> decimal.Decimal | int:
         if n < 0:
             return -1
+        n = int(n)
         if temp_n > 0:
             sum = temp_res
         else:
@@ -332,6 +293,8 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                             temp_n: int = 0, temp_res: decimal.Decimal | int = 0) -> decimal.Decimal | int:
         if n < flow_ctrl:
             return -1
+        n = int(n)
+        flow_ctrl = int(flow_ctrl)
         if temp_n > 0:
             sum = temp_res
         else:
@@ -398,24 +361,65 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
         self._cache_q0[flow_ctrl][prob][cpu_alloc] = max(1, ql_rec)
         return max(1, ql_rec)
 
-    def run(self, max_ql=1000, save_to_file: str | None = None, dry_run: bool = False) -> None:
+    def run(self, max_ql=1000, save_to_file: str | None = None, dry_run: bool = False, beginning_str: str = '') -> None:
 
         def write_to_file(msg='', append=True):
             if save_to_file is None:
                 print(msg)
             else:
                 if append:
-                    with open(save_to_file, 'a') as file:
+                    with open(save_to_file, 'a', encoding='utf-8') as file:
                         file.write(msg + '\n')
                 else:
-                    with open(save_to_file, 'w') as file:
+                    with open(save_to_file, 'w', encoding='utf-8') as file:
                         file.write(msg + '\n')
+
+        def get_next_cpu_alloc(cpu_alloc: decimal.Decimal | int) -> decimal.Decimal | int:
+            if cpu_alloc - self._cpu_lower_bound < 0.5:
+                return cpu_alloc + decimal.Decimal(0.1)
+            elif cpu_alloc - self._cpu_lower_bound < 3:
+                return cpu_alloc + decimal.Decimal(0.5)
+            else:
+                return math.ceil(cpu_alloc) + 1
+
+        def get_next_flow_ctrl(flow_ctrl: int) -> int:
+            if flow_ctrl <= self._fc_limits[0]:
+                if math.ceil(self._fc_limits[0]) == math.floor(self._fc_limits[0]):
+                    return int(self._fc_limits[0] + 1)
+                else:
+                    return math.ceil(self._fc_limits[0])
+            small_step_intervals = []
+            for i, limit in enumerate(self._fc_limits):
+                if i % 2 == 0:
+                    if math.ceil(limit) == math.floor(limit):
+                        small_step_intervals.append((int(limit + 1), int(limit + 5)))
+                    else:
+                        small_step_intervals.append((math.ceil(limit), math.ceil(limit) + 4))
+                else:
+                    if math.ceil(limit) == math.floor(limit):
+                        small_step_intervals.append((int(limit - 5), int(limit + -1)))
+                    else:
+                        small_step_intervals.append((math.floor(limit) - 4, math.floor(limit)))
+            small_step = False
+            next_interval_index = -1
+            for i, interval in enumerate(small_step_intervals):
+                if interval[0] <= flow_ctrl < interval[1]:
+                    small_step = True
+                    break
+                if interval[0] > flow_ctrl:
+                    next_interval_index = i
+            if small_step or flow_ctrl < self._fc_limits[0]:
+                return flow_ctrl + 1
+            else:
+                if next_interval_index != -1:
+                    return min(flow_ctrl + 10, small_step_intervals[next_interval_index][0])
+                return flow_ctrl + 10
 
         if max_ql < 0:
             max_ql = 0
         # write_to_file(f'q* = {max_ql}', append=False)
         start = time.time()
-        write_to_file(str(self))
+        write_to_file(beginning_str)
         point_num = 0
         total_n = {'p_0': 0, 'L': 0, 'L_q': 0}
         for ql in np.linspace(0, max_ql, 21):
@@ -433,10 +437,10 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                         cpu_alloc_display = cpu_alloc.quantize(decimal.Decimal('0.000'))
                     else:
                         cpu_alloc_display = decimal.Decimal(cpu_alloc).quantize(decimal.Decimal('0.000'))
-                    write_to_file(f'----------\nq* = {ql}\nc* = {cpu_alloc_display}\nf* = {flow_control}')
+                    write_to_file(f'----------\nq* = {ql}\nc* = {cpu_alloc_display}\nf* = {int(flow_control)}')
                     if not self.meet_steady_state_condition(cpu_alloc, flow_control):
                         write_to_file('overload')
-                        flow_control = self._get_next_flow_ctrl(flow_control)
+                        flow_control = get_next_flow_ctrl(flow_control)
                         continue
                     if dry_run:
                         point_num += 1
@@ -455,8 +459,8 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                         total_n['L'] += flow_control + ql
                         total_n['L_q'] += ql
                         point_num += 1
-                    flow_control = self._get_next_flow_ctrl(flow_control)
-                cpu_alloc = self._get_next_cpu_alloc(cpu_alloc)
+                    flow_control = get_next_flow_ctrl(flow_control)
+                cpu_alloc = get_next_cpu_alloc(cpu_alloc)
         end = time.time()
         execution_time = end - start
         write_to_file(f'----------------------------------------\n'
@@ -467,3 +471,28 @@ class QueueModelwithTruncation:  # similar to M/M/c/K
                       f'    p_0: {total_n["p_0"]}\n'
                       f'    L: {total_n["L"]}\n'
                       f'    L_q: {total_n["L_q"]}')
+
+
+class QueueModelBasic(QueueModelCustom):  # M/M/c/K model -- CPU-concurrency mapping f(x)=min(x,f^*)
+    def __init__(self, cpu_upper_bound: decimal.Decimal | float | int, max_concurrency: int,
+                 total_load: decimal.Decimal | float | int, delta_t: int, req_num: int, enable_tqdm: bool = False):
+        if max_concurrency <= cpu_upper_bound:
+            concurrency = np.array([0, max_concurrency])
+            cpu_utl = np.array([0, cpu_upper_bound])
+        else:
+            concurrency = np.array([0, math.floor(cpu_upper_bound), math.floor(cpu_upper_bound) + 1, max_concurrency])
+            cpu_utl = np.array([0, math.floor(cpu_upper_bound), cpu_upper_bound, cpu_upper_bound])
+        super().__init__(concurrency=concurrency, cpu_utl=cpu_utl, total_load=total_load, delta_t=delta_t,
+                         req_num=req_num, interp_method='linear', enable_tqdm=enable_tqdm)
+
+    def __str__(self):
+        return (f'M/M/c/K model\n'
+                f'Params:\n'
+                f'  Delta t = {self._delta_t}ms\n'
+                f'  Number of requests = {self._req_num}\n'
+                f'  Total load = {self._total_load:.3f}ms·core'
+                f'Bounds:\n'
+                f'  CPU lower bound = {self._cpu_lower_bound}\n'
+                f'  CPU upper bound = {self._cpu_upper_bound}\n'
+                f'  Flow control limits = {self._fc_limits}'
+                )
