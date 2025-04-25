@@ -25,7 +25,7 @@ class TcUpdater:
                                  'workload-low']
         self.default_plc_ql = 50
 
-    def update_fc_with_k8s_client(self, concurrency: int, queue_length: int):
+    def update_tc_with_k8s_client(self, concurrency: int, queue_length: int):
         if concurrency <= 0:
             utils.logging_or_print(f'TcUpdater: concurrency {concurrency} <= 0, update canceled.',
                                    enable_logging=self.enable_logging, level=logging.WARNING)
@@ -98,13 +98,13 @@ class TcUpdater:
                                                f'update canceled: {e}.', enable_logging=self.enable_logging,
                                                level=logging.ERROR)
                         return
-        utils.logging_or_print(f'TcUpdater: FC update complete (f*={concurrency}, q*={queue_length}).',
+        utils.logging_or_print(f'TcUpdater: TC update complete (f*={concurrency}, q*={queue_length}).',
                                enable_logging=self.enable_logging, level=logging.INFO)
 
-    def reset_fc(self, wider_apiserver_fcp: bool = False):
+    def reset_tc(self, wider_apiserver_tcp: bool = False):
         ncs_merkury_empty = int(245 * (self.total_seats - 600) / 600)
         # 245: sum ncs of 6 default plc; 600: default seats for apiserver
-        if wider_apiserver_fcp:
+        if wider_apiserver_tcp:
             ncs_merkury_empty = 1  # if set to 0, will be automatically changed to 30
         with (client.ApiClient(self.config) as api_client):
             api_instance = client.FlowcontrolApiserverV1beta3Api(api_client)
@@ -158,4 +158,4 @@ class TcUpdater:
                             f'TcUpdater: failed to reset queue length limit of {default_plc} plc, '
                             f'update canceled: {e}.', enable_logging=self.enable_logging, level=logging.ERROR)
                         return
-        utils.logging_or_print('TcUpdater: FC reset complete.', enable_logging=self.enable_logging, level=logging.INFO)
+        utils.logging_or_print('TcUpdater: TC reset complete.', enable_logging=self.enable_logging, level=logging.INFO)
