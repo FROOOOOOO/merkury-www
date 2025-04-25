@@ -36,6 +36,10 @@ NODE_ALLOCATABLE_MEMORY = 30000  # unit: 10^6B, replace with your master node in
 PROM_URL = 'http://192.168.15.78:30532'  # replace with your master node info
 APISERVER_TEST_URL = 'https://192.168.1.100:6443'  # replace with your master node info
 APISERVER_SUPPORT_URL = 'https://192.168.15.78:6443'  # replace with your master node info
+WORKER_NODE_IP = '192.168.26.12'
+PORT_MYSQL = '30336'
+PORT_REDIS = '31081'
+PORT_NGINX = '31090'
 # tokens to authenticate Prometheus query, stress test, and updater requests, generate them and fill in
 # prometheus, cluster: test
 AUTH_TOKEN = ''
@@ -97,8 +101,6 @@ GA_ES_THRESHOLD = 0.01
 GA_ES_MAX_GEN = 10
 GA_TIME_SPACE_RATIO = 0.5  # ≈ optimization_time / (cpu_left * cpu_granularity)
 GA_TIME_LIMIT = 10  # max allowed optimization_time
-# other constants
-MARGIN_ERROR = 1e-5  # if |a-b|<= MARGIN_ERROR, consider as a=b, used in mono_check
 
 
 # util functions
