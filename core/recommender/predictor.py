@@ -116,7 +116,7 @@ class Predictor:
         return prediction, int(total_time_window / len(self.time_windows))
 
     def _predict_decay(self, decay_func: callable) -> (float | int, int):
-        decay_weights = [decay_func(time_passed=self.start_timestamps[-1] - self.time_windows[i])
+        decay_weights = [decay_func(time_passed=self.start_timestamps[-1] - self.start_timestamps[i])
                          for i in range(len(self.time_windows))]
         decay_windows = [self.time_windows[i] * decay_weights[i] for i in range(len(decay_weights))]
         prediction = {}
@@ -156,8 +156,11 @@ class Predictor:
             forecast = model_fit.forecast(steps=1)
             # restore original data
             forecast_value = forecast[0]
-            original_forecast = forecast_value + original_series[-d:]
-            prediction[k] = original_forecast
+            # integrate back d times
+            for _ in range(d):
+                forecast_value = forecast_value + original_series.iloc[-1]
+                original_series = original_series.append(pd.Series([forecast_value]))
+            prediction[k] = forecast_value
         return prediction, time_window
 
     def _predict_VARMA(self) -> (dict[float | int], int):
@@ -191,5 +194,9 @@ class Predictor:
         # restore original data
         forecast_dict = forecast.to_dict('list')
         for k in self.data.keys():
-            prediction[k] = forecast_dict[k][0] + self.data[k][-d:]
+            forecast_value = forecast_dict[k][0]
+            # integrate back d times
+            for i in range(1, d + 1):
+                forecast_value = forecast_value + self.data[k][-i]
+            prediction[k] = forecast_value
         return prediction, time_window
